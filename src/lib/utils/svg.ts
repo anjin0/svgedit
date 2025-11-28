@@ -169,6 +169,7 @@ export const createLine = (
 	};
 };
 
+// 화면 좌표를 SVG 사용자 좌표로 변환하는 함수
 export const getMousePosition = (event: MouseEvent, svg: SVGSVGElement): Point => {
 	const CTM = svg.getScreenCTM();
 	if (CTM) {

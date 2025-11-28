@@ -1,5 +1,7 @@
 import type { Tool, SVGElement } from '$lib/types';
 
+type DistributiveUpdates<T> = T extends any ? Omit<Partial<T>, 'type'> : never;
+
 class EditorStore {
 	currentTool = $state<Tool>('select');
 	elements = $state<SVGElement[]>([]);
@@ -12,10 +14,10 @@ class EditorStore {
 		this.elements.push(element);
 	};
 
-	updateElement = (id: string, updates: Partial<SVGElement>) => {
+	updateElement = (id: string, updates: DistributiveUpdates<SVGElement>) => {
 		const index = this.elements.findIndex((el) => el.id === id);
 		if (index !== -1) {
-			this.elements[index] = { ...this.elements[index], ...updates };
+			this.elements[index] = { ...this.elements[index], ...updates } as SVGElement;
 		}
 	};
 

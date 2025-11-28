@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { SVGElement, TransformHandle } from '$lib/types';
+	import type { SVGElement, TransformHandle, Point } from '$lib/types';
 	import { editorStore } from '$lib/stores/editor.svelte';
 	import { getMousePosition } from '$lib/utils/svg';
 
@@ -74,6 +74,21 @@
 			y: b.y + b.height / 2
 		};
 	});
+
+	// Helper function: Rotate a point around a center by a given angle (in degrees)
+	const rotatePoint = (pointX: number, pointY: number, centerX: number, centerY: number, angleDeg: number): Point => {
+		const angleRad = angleDeg * (Math.PI / 180);
+		const cos = Math.cos(angleRad);
+		const sin = Math.sin(angleRad);
+		
+		const relX = pointX - centerX;
+		const relY = pointY - centerY;
+		
+		return {
+			x: centerX + relX * cos - relY * sin,
+			y: centerY + relX * sin + relY * cos
+		};
+	};
 
 	const handleMouseDown = (handle: TransformHandle, e: MouseEvent) => {
 		e.stopPropagation();
@@ -189,6 +204,45 @@
 					oppositeHandlePos = { x: actualTopLeftX, y: actualTopLeftY + actualHeight / 2 };
 					break;
 			}
+		} else if (element.type === 'ellipse') {
+			// For ellipse, calculate based on initial center and radii (without padding)
+			const initialCenterX = initialElement.transform.x;
+			const initialCenterY = initialElement.transform.y;
+			const initialRadiusX = initialElement.radiusX;
+			const initialRadiusY = initialElement.radiusY;
+			
+			// Actual bounding box (without padding)
+			const actualTopLeftX = initialCenterX - initialRadiusX;
+			const actualTopLeftY = initialCenterY - initialRadiusY;
+			const actualWidth = initialRadiusX * 2;
+			const actualHeight = initialRadiusY * 2;
+			
+			switch (dragHandle) {
+				case 'top-left':
+					oppositeHandlePos = { x: actualTopLeftX + actualWidth, y: actualTopLeftY + actualHeight };
+					break;
+				case 'top-right':
+					oppositeHandlePos = { x: actualTopLeftX, y: actualTopLeftY + actualHeight };
+					break;
+				case 'bottom-left':
+					oppositeHandlePos = { x: actualTopLeftX + actualWidth, y: actualTopLeftY };
+					break;
+				case 'bottom-right':
+					oppositeHandlePos = { x: actualTopLeftX, y: actualTopLeftY };
+					break;
+				case 'top':
+					oppositeHandlePos = { x: actualTopLeftX + actualWidth / 2, y: actualTopLeftY + actualHeight };
+					break;
+				case 'bottom':
+					oppositeHandlePos = { x: actualTopLeftX + actualWidth / 2, y: actualTopLeftY };
+					break;
+				case 'left':
+					oppositeHandlePos = { x: actualTopLeftX + actualWidth, y: actualTopLeftY + actualHeight / 2 };
+					break;
+				case 'right':
+					oppositeHandlePos = { x: actualTopLeftX, y: actualTopLeftY + actualHeight / 2 };
+					break;
+			}
 		} else {
 			// For other shapes, use initialBounds but account for padding
 			const b = initialBounds;
@@ -226,74 +280,277 @@
 		}
 
 		// Log handle positions
-		console.log('=== Handle Drag Info ===');
-		console.log('Handle Type:', dragHandle);
-		console.log('Current Handle Position:', currentHandle ? { x: currentHandle.x, y: currentHandle.y } : 'N/A');
-		console.log('Element Position:', { x: element.transform.x, y: element.transform.y });
-		console.log('Opposite Handle Position:', oppositeHandlePos);
+		// console.log('=== Handle Drag Info ===');
+		// console.log('Handle Type:', dragHandle);
+		// console.log('Current Handle Position:', currentHandle ? { x: currentHandle.x, y: currentHandle.y } : 'N/A');
+		// console.log('Element Position:', { x: element.transform.x, y: element.transform.y });
+		// console.log('Opposite Handle Position:', oppositeHandlePos);
 
 		if (element.type === 'circle') {
-			// Circle uses delta with rotation
-			handleCircleResize(rotatedDx, rotatedDy);
+			// Circle uses absolute mouse position (no rotation compensation needed)
+			handleCircleResize(currentPoint, oppositeHandlePos);
 		} else if (element.type === 'ellipse') {
-			// Ellipse uses delta with rotation
-			handleEllipseResize(rotatedDx, rotatedDy);
+			// Ellipse uses absolute mouse position (no rotation compensation needed)
+			handleEllipseResize(currentPoint, oppositeHandlePos);
 		} else {
 			if (element.type === 'rectangle') {
-				handleRectangleResize(rotatedDx, rotatedDy);
+				// Rectangle uses absolute mouse position to handle rotation correctly
+				handleRectangleResize(currentPoint);
 			} else if (element.type === 'line') {
 				handleLineResize(rotatedDx, rotatedDy);
 			}
 		}
 	};
 
-	const handleRectangleResize = (dx: number, dy: number) => {
+	const handleRectangleResize = (dragGlobalPos: Point) => {
 		if (element.type !== 'rectangle') return;
 
-		let newX = initialElement.transform.x;
-		let newY = initialElement.transform.y;
-		let newWidth = initialElement.width;
-		let newHeight = initialElement.height;
+		console.log('=== Rectangle Resize (Global Anchor Point Method) ===');
+		console.log('Drag Handle:', dragHandle);
+		console.log('Drag Global Position:', dragGlobalPos);
+
+		// Initial state (local coordinates)
+		const initialX = initialElement.transform.x;
+		const initialY = initialElement.transform.y;
+		const initialWidth = initialElement.width;
+		const initialHeight = initialElement.height;
+		const rotation = initialElement.transform.rotation;
+
+		// 1. Calculate initial center (local coordinates)
+		const initialCenterX = initialX + initialWidth / 2;
+		const initialCenterY = initialY + initialHeight / 2;
+
+		// 2. Determine opposite handle(s) position in LOCAL coordinates
+		let anchorLocalX: number;
+		let anchorLocalY: number;
+		let useDoubleAnchor = false;
+		let anchor2LocalX: number = 0;
+		let anchor2LocalY: number = 0;
 
 		switch (dragHandle) {
 			case 'top-left':
-				newX += dx;
-				newY += dy;
-				newWidth -= dx;
-				newHeight -= dy;
+				anchorLocalX = initialX + initialWidth;
+				anchorLocalY = initialY + initialHeight;
 				break;
 			case 'top-right':
-				newY += dy;
-				newWidth += dx;
-				newHeight -= dy;
+				anchorLocalX = initialX;
+				anchorLocalY = initialY + initialHeight;
 				break;
 			case 'bottom-left':
-				newX += dx;
-				newWidth -= dx;
-				newHeight += dy;
+				anchorLocalX = initialX + initialWidth;
+				anchorLocalY = initialY;
 				break;
 			case 'bottom-right':
-				newWidth += dx;
-				newHeight += dy;
+				anchorLocalX = initialX;
+				anchorLocalY = initialY;
 				break;
 			case 'top':
-				newY += dy;
-				newHeight -= dy;
+				// Fix bottom edge: bottom-left + bottom-right
+				useDoubleAnchor = true;
+				anchorLocalX = initialX;
+				anchorLocalY = initialY + initialHeight;
+				anchor2LocalX = initialX + initialWidth;
+				anchor2LocalY = initialY + initialHeight;
 				break;
 			case 'bottom':
-				newHeight += dy;
+				// Fix top edge: top-left + top-right
+				useDoubleAnchor = true;
+				anchorLocalX = initialX;
+				anchorLocalY = initialY;
+				anchor2LocalX = initialX + initialWidth;
+				anchor2LocalY = initialY;
 				break;
 			case 'left':
-				newX += dx;
-				newWidth -= dx;
+				// Fix right edge: top-right + bottom-right
+				useDoubleAnchor = true;
+				anchorLocalX = initialX + initialWidth;
+				anchorLocalY = initialY;
+				anchor2LocalX = initialX + initialWidth;
+				anchor2LocalY = initialY + initialHeight;
 				break;
 			case 'right':
-				newWidth += dx;
+				// Fix left edge: top-left + bottom-left
+				useDoubleAnchor = true;
+				anchorLocalX = initialX;
+				anchorLocalY = initialY;
+				anchor2LocalX = initialX;
+				anchor2LocalY = initialY + initialHeight;
 				break;
+			default:
+				return;
 		}
 
+		// 3. Transform anchor(s) to GLOBAL coordinates (rotate around initial center)
+		let anchorGlobalX: number;
+		let anchorGlobalY: number;
+
+		if (useDoubleAnchor) {
+			// For edge handles: use midpoint of two fixed corners
+			const anchor1Global = rotatePoint(
+				anchorLocalX,
+				anchorLocalY,
+				initialCenterX,
+				initialCenterY,
+				rotation
+			);
+			const anchor2Global = rotatePoint(
+				anchor2LocalX,
+				anchor2LocalY,
+				initialCenterX,
+				initialCenterY,
+				rotation
+			);
+			
+			// Use midpoint as the effective anchor
+			anchorGlobalX = (anchor1Global.x + anchor2Global.x) / 2;
+			anchorGlobalY = (anchor1Global.y + anchor2Global.y) / 2;
+			
+			console.log('Anchor1 Local:', { x: anchorLocalX, y: anchorLocalY });
+			console.log('Anchor1 Global:', anchor1Global);
+			console.log('Anchor2 Local:', { x: anchor2LocalX, y: anchor2LocalY });
+			console.log('Anchor2 Global:', anchor2Global);
+			console.log('Fixed Edge Center (Global):', { x: anchorGlobalX, y: anchorGlobalY });
+		} else {
+			// For corner handles: single anchor point
+			const anchorGlobal = rotatePoint(
+				anchorLocalX,
+				anchorLocalY,
+				initialCenterX,
+				initialCenterY,
+				rotation
+			);
+			anchorGlobalX = anchorGlobal.x;
+			anchorGlobalY = anchorGlobal.y;
+			
+			console.log('Anchor Local:', { x: anchorLocalX, y: anchorLocalY });
+			console.log('Anchor Global (Fixed):', { x: anchorGlobalX, y: anchorGlobalY });
+		}
+
+		// 4. Calculate new center in GLOBAL coordinates
+		let newCenterGlobalX: number;
+		let newCenterGlobalY: number;
+
+		if (useDoubleAnchor) {
+			// For edge handles: only one dimension changes, the other is fixed
+			// Determine if it's a vertical or horizontal edge
+			const isVerticalEdge = Math.abs(anchorLocalX - anchor2LocalX) < 0.01;
+			
+			if (isVerticalEdge) {
+				// Vertical edge (left/right handle): X changes, Y is fixed
+				newCenterGlobalX = (anchorGlobalX + dragGlobalPos.x) / 2;
+				newCenterGlobalY = anchorGlobalY;  // Fixed at anchor midpoint
+			} else {
+				// Horizontal edge (top/bottom handle): Y changes, X is fixed
+				newCenterGlobalX = anchorGlobalX;  // Fixed at anchor midpoint
+				newCenterGlobalY = (anchorGlobalY + dragGlobalPos.y) / 2;
+			}
+		} else {
+			// Corner handle: both dimensions change
+			newCenterGlobalX = (anchorGlobalX + dragGlobalPos.x) / 2;
+			newCenterGlobalY = (anchorGlobalY + dragGlobalPos.y) / 2;
+		}
+
+		console.log('New Center Global:', { x: newCenterGlobalX, y: newCenterGlobalY });
+
+		// 5. Transform both handles to LOCAL coordinates (rotate around NEW center)
+		// Since the rectangle hasn't rotated yet, new center in global = new center in local
+		const newCenterLocalX = newCenterGlobalX;
+		const newCenterLocalY = newCenterGlobalY;
+
+		// Transform anchor back to local (reverse rotation around new center)
+		const anchorNewLocal = rotatePoint(
+			anchorGlobalX,
+			anchorGlobalY,
+			newCenterLocalX,
+			newCenterLocalY,
+			-rotation
+		);
+
+		// Transform drag handle to local (reverse rotation around new center)
+		const dragNewLocal = rotatePoint(
+			dragGlobalPos.x,
+			dragGlobalPos.y,
+			newCenterLocalX,
+			newCenterLocalY,
+			-rotation
+		);
+
+		console.log('Anchor New Local:', anchorNewLocal);
+		console.log('Drag New Local:', dragNewLocal);
+
+		// 6. Calculate new rectangle dimensions in LOCAL coordinates
+		let newWidth: number;
+		let newHeight: number;
+
+		if (useDoubleAnchor) {
+			// For edge handles: need to calculate the fixed dimension correctly
+			// Transform both fixed corners back to local coordinates
+			const anchor1Global = rotatePoint(
+				anchorLocalX,
+				anchorLocalY,
+				initialCenterX,
+				initialCenterY,
+				rotation
+			);
+			const anchor2Global = rotatePoint(
+				anchor2LocalX,
+				anchor2LocalY,
+				initialCenterX,
+				initialCenterY,
+				rotation
+			);
+			
+			const anchor1NewLocal = rotatePoint(
+				anchor1Global.x,
+				anchor1Global.y,
+				newCenterLocalX,
+				newCenterLocalY,
+				-rotation
+			);
+			const anchor2NewLocal = rotatePoint(
+				anchor2Global.x,
+				anchor2Global.y,
+				newCenterLocalX,
+				newCenterLocalY,
+				-rotation
+			);
+
+			// Calculate which dimension is fixed based on the two corners
+			// If X coordinates are the same, it's a vertical edge (width changes, height fixed)
+			// If Y coordinates are the same, it's a horizontal edge (height changes, width fixed)
+			const isVerticalEdge = Math.abs(anchor1NewLocal.x - anchor2NewLocal.x) < 0.01;
+			
+			if (isVerticalEdge) {
+				// Vertical edge (left or right handle): height is fixed
+				newHeight = Math.abs(anchor2NewLocal.y - anchor1NewLocal.y);
+				newWidth = Math.abs(dragNewLocal.x - anchorNewLocal.x);
+			} else {
+				// Horizontal edge (top or bottom handle): width is fixed
+				newWidth = Math.abs(anchor2NewLocal.x - anchor1NewLocal.x);
+				newHeight = Math.abs(dragNewLocal.y - anchorNewLocal.y);
+			}
+			
+			console.log('Fixed Edge Corners (New Local):', { anchor1: anchor1NewLocal, anchor2: anchor2NewLocal });
+			console.log('Is Vertical Edge:', isVerticalEdge);
+		} else {
+			// Corner handle: both dimensions change
+			newWidth = Math.abs(dragNewLocal.x - anchorNewLocal.x);
+			newHeight = Math.abs(dragNewLocal.y - anchorNewLocal.y);
+		}
+
+		// Minimum size constraints
 		if (newWidth < 10) newWidth = 10;
 		if (newHeight < 10) newHeight = 10;
+
+		// 7. Calculate new top-left position (new center - half size)
+		const newX = newCenterLocalX - newWidth / 2;
+		const newY = newCenterLocalY - newHeight / 2;
+
+		console.log('New Rectangle:', { x: newX, y: newY, width: newWidth, height: newHeight });
+		console.log('Center moved by:', {
+			dx: newCenterLocalX - initialCenterX,
+			dy: newCenterLocalY - initialCenterY
+		});
 
 		editorStore.updateElement(element.id, {
 			transform: { ...element.transform, x: newX, y: newY },
@@ -302,87 +559,58 @@
 		});
 	};
 
-	const handleCircleResize = (dx: number, dy: number) => {
+	const handleCircleResize = (dragHandlePos: Point, oppositePos: Point) => {
 		if (element.type !== 'circle') return;
 
-		// Initial state from when drag started
-		const initialCenterX = initialElement.transform.x;
-		const initialCenterY = initialElement.transform.y;
-		const initialRadius = initialElement.radius;
-
-		// Calculate as if it's a rectangle (bounding box)
-		// Rectangle uses top-left corner, circle uses center
-		// So we need to convert: topLeftX = centerX - radius
-		let topLeftX = initialCenterX - initialRadius;
-		let topLeftY = initialCenterY - initialRadius;
-		let newWidth = initialRadius * 2;
-		let newHeight = initialRadius * 2;
-
-		console.log('=== Circle Resize Debug ===');
-		console.log('Initial:', { centerX: initialCenterX, centerY: initialCenterY, radius: initialRadius });
-		console.log('Initial topLeft:', { x: topLeftX, y: topLeftY });
-		console.log('Delta:', { dx, dy });
+		console.log('=== Circle Resize (Anchor Point Method) ===');
 		console.log('Drag Handle:', dragHandle);
+		console.log('Drag Handle Position:', dragHandlePos);
+		console.log('Opposite Handle Position (Fixed):', oppositePos);
 
-		// Use same logic as Rectangle for bounding box
+		// Calculate new center as midpoint between drag handle and opposite handle
+		const newX = (dragHandlePos.x + oppositePos.x) / 2;
+		const newY = (dragHandlePos.y + oppositePos.y) / 2;
+
+		// Calculate new radius based on handle type
+		let newRadius: number;
+
 		switch (dragHandle) {
 			case 'top-left':
-				topLeftX += dx;
-				topLeftY += dy;
-				newWidth -= dx;
-				newHeight -= dy;
-				break;
 			case 'top-right':
-				topLeftY += dy;
-				newWidth += dx;
-				newHeight -= dy;
-				break;
 			case 'bottom-left':
-				topLeftX += dx;
-				newWidth -= dx;
-				newHeight += dy;
-				break;
 			case 'bottom-right':
-				newWidth += dx;
-				newHeight += dy;
+				// Corner handles: use diagonal distance / 2
+				const diagonalDist = Math.sqrt(
+					Math.pow(dragHandlePos.x - oppositePos.x, 2) +
+					Math.pow(dragHandlePos.y - oppositePos.y, 2)
+				);
+				newRadius = diagonalDist / 2;
 				break;
+
 			case 'top':
-				topLeftY += dy;
-				newHeight -= dy;
-				break;
 			case 'bottom':
-				newHeight += dy;
+				// Vertical handles: use vertical distance / 2
+				newRadius = Math.abs(dragHandlePos.y - oppositePos.y) / 2;
 				break;
+
 			case 'left':
-				topLeftX += dx;
-				newWidth -= dx;
-				break;
 			case 'right':
-				newWidth += dx;
+				// Horizontal handles: use horizontal distance / 2
+				newRadius = Math.abs(dragHandlePos.x - oppositePos.x) / 2;
 				break;
+
+			default:
+				newRadius = initialElement.radius;
 		}
-
-		console.log('After switch - topLeft:', { x: topLeftX, y: topLeftY });
-		console.log('After switch - size:', { width: newWidth, height: newHeight });
-
-		// Convert back to circle: center = topLeft + (width/2, height/2)
-		const newX = topLeftX + newWidth / 2;
-		const newY = topLeftY + newHeight / 2;
-
-		console.log('New center:', { x: newX, y: newY });
-		console.log('Center moved by:', { dx: newX - initialCenterX, dy: newY - initialCenterY });
-
-		// For circle, use the average of width and height to maintain circular shape
-		const avgSize = (newWidth + newHeight) / 2;
-		const newRadius = avgSize / 2;
 
 		// Minimum radius constraint
 		const finalRadius = Math.max(5, newRadius);
 
-		console.log('New radius:', finalRadius);
-		console.log('Opposite handle should be at:', {
-			topLeft: { x: topLeftX, y: topLeftY },
-			bottomRight: { x: topLeftX + newWidth, y: topLeftY + newHeight }
+		console.log('New Center:', { x: newX, y: newY });
+		console.log('New Radius:', finalRadius);
+		console.log('Center moved by:', {
+			dx: newX - initialElement.transform.x,
+			dy: newY - initialElement.transform.y
 		});
 
 		editorStore.updateElement(element.id, {
@@ -391,70 +619,32 @@
 		});
 	};
 
-	const handleEllipseResize = (dx: number, dy: number) => {
+	const handleEllipseResize = (dragHandlePos: Point, oppositePos: Point) => {
 		if (element.type !== 'ellipse') return;
 
-		// Initial state from when drag started
-		const initialCenterX = initialElement.transform.x;
-		const initialCenterY = initialElement.transform.y;
-		const initialRadiusX = initialElement.radiusX;
-		const initialRadiusY = initialElement.radiusY;
+		console.log('=== Ellipse Resize (Anchor Point Method) ===');
+		console.log('Drag Handle:', dragHandle);
+		console.log('Drag Handle Position:', dragHandlePos);
+		console.log('Opposite Handle Position (Fixed):', oppositePos);
 
-		// Calculate as if it's a rectangle (bounding box)
-		// Rectangle uses top-left corner, ellipse uses center
-		// So we need to convert: topLeftX = centerX - radiusX
-		let topLeftX = initialCenterX - initialRadiusX;
-		let topLeftY = initialCenterY - initialRadiusY;
-		let newWidth = initialRadiusX * 2;
-		let newHeight = initialRadiusY * 2;
+		// Calculate new center as midpoint between drag handle and opposite handle
+		const newX = (dragHandlePos.x + oppositePos.x) / 2;
+		const newY = (dragHandlePos.y + oppositePos.y) / 2;
 
-		// Use same logic as Rectangle for bounding box
-		switch (dragHandle) {
-			case 'top-left':
-				topLeftX += dx;
-				topLeftY += dy;
-				newWidth -= dx;
-				newHeight -= dy;
-				break;
-			case 'top-right':
-				topLeftY += dy;
-				newWidth += dx;
-				newHeight -= dy;
-				break;
-			case 'bottom-left':
-				topLeftX += dx;
-				newWidth -= dx;
-				newHeight += dy;
-				break;
-			case 'bottom-right':
-				newWidth += dx;
-				newHeight += dy;
-				break;
-			case 'top':
-				topLeftY += dy;
-				newHeight -= dy;
-				break;
-			case 'bottom':
-				newHeight += dy;
-				break;
-			case 'left':
-				topLeftX += dx;
-				newWidth -= dx;
-				break;
-			case 'right':
-				newWidth += dx;
-				break;
-		}
-
-		// Convert back to ellipse: center = topLeft + (width/2, height/2)
-		const newX = topLeftX + newWidth / 2;
-		const newY = topLeftY + newHeight / 2;
-		const newRadiusX = newWidth / 2;
-		const newRadiusY = newHeight / 2;
+		// Calculate new radii based on distances
+		const newRadiusX = Math.abs(dragHandlePos.x - oppositePos.x) / 2;
+		const newRadiusY = Math.abs(dragHandlePos.y - oppositePos.y) / 2;
 
 		// Minimum radius constraints
 		const finalRadiusX = Math.max(5, newRadiusX);
 		const finalRadiusY = Math.max(5, newRadiusY);
+
+		console.log('New Center:', { x: newX, y: newY });
+		console.log('New Radii:', { radiusX: finalRadiusX, radiusY: finalRadiusY });
+		console.log('Center moved by:', {
+			dx: newX - initialElement.transform.x,
+			dy: newY - initialElement.transform.y
+		});
 
 		editorStore.updateElement(element.id, {
 			transform: { ...element.transform, x: newX, y: newY },
@@ -662,8 +852,10 @@
 		{/each}
 	</g>
 {:else}
-	<!-- For Circle and Ellipse: Rotated selection box and handles -->
+	<!-- For Circle and Ellipse: Rotated selection box, non-rotated handles -->
 	{@const b = bounds()}
+	
+	<!-- Rotated group: Selection box and rotation handle only -->
 	<g
 		class="transform-controls"
 		transform="rotate({element.transform.rotation} {centerPoint().x} {centerPoint().y})"
@@ -706,23 +898,23 @@
 			aria-label="Rotate element"
 			onmousedown={handleRotateMouseDown}
 		/>
-
-		<!-- Transform handles -->
-		{#each handles() as handle}
-			<rect
-				x={handle.x - 4}
-				y={handle.y - 4}
-				width="8"
-				height="8"
-				fill="white"
-				stroke="#4f46e5"
-				stroke-width="1.5"
-				class="cursor-pointer"
-				role="button"
-				tabindex="0"
-				aria-label="Resize handle: {handle.type}"
-				onmousedown={(e) => handleMouseDown(handle.type, e)}
-			/>
-		{/each}
 	</g>
+
+	<!-- Transform handles (non-rotated, always axis-aligned) -->
+	{#each handles() as handle}
+		<rect
+			x={handle.x - 4}
+			y={handle.y - 4}
+			width="8"
+			height="8"
+			fill="white"
+			stroke="#4f46e5"
+			stroke-width="1.5"
+			class="cursor-pointer"
+			role="button"
+			tabindex="0"
+			aria-label="Resize handle: {handle.type}"
+			onmousedown={(e) => handleMouseDown(handle.type, e)}
+		/>
+	{/each}
 {/if}

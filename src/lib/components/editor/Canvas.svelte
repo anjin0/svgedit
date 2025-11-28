@@ -11,7 +11,7 @@
 	import TransformControls from './TransformControls.svelte';
 	import type { Point } from '$lib/types';
 
-	let svgElement: SVGSVGElement;
+	let svgElement = $state<SVGSVGElement>();
 	let isPanning = $state(false);
 	let lastPanPoint = $state({ x: 0, y: 0 });
 	let isMoving = $state(false);
@@ -183,13 +183,14 @@
 <svelte:window onmouseup={handleMouseUp} onmousemove={handleMouseMove} onkeydown={handleKeyDown} />
 
 <div class="relative flex-1 bg-gray-50 overflow-hidden">
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 	<svg
 		bind:this={svgElement}
 		class="w-full h-full bg-white {isPanning ? 'cursor-grabbing' : editorStore.currentTool === 'select' ? 'cursor-default' : 'cursor-crosshair'}"
 		viewBox="{canvasStore.viewBox.x} {canvasStore.viewBox.y} {canvasStore.viewBox.width} {canvasStore.viewBox.height}"
 		onmousedown={handleMouseDown}
 		onwheel={handleWheel}
-		role="img"
+		role="application"
 		aria-label="SVG Canvas"
 	>
 		<defs>

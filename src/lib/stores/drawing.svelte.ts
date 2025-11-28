@@ -4,7 +4,7 @@ class DrawingStore {
 	isDrawing = $state<boolean>(false);
 	startPoint = $state<Point | null>(null);
 	currentPoint = $state<Point | null>(null);
-	previewElement = $state<Partial<SVGElement> | null>(null);
+	previewElement = $state<SVGElement | null>(null);
 
 	startDrawing = (point: Point) => {
 		this.isDrawing = true;
@@ -31,7 +31,7 @@ class DrawingStore {
 		return null;
 	};
 
-	setPreviewElement = (element: Partial<SVGElement> | null) => {
+	setPreviewElement = (element: SVGElement | null) => {
 		this.previewElement = element;
 	};
 
