@@ -6,11 +6,14 @@
 	let svgElement: SVGSVGElement;
 
 	// Rectangle state
-	let rectX = $state(200);
-	let rectY = $state(150);
+	let rectX = $state(300);
+	let rectY = $state(200);
 	let rectWidth = $state(200);
 	let rectHeight = $state(100);
 	let rotation = $state(0);
+
+	// Padding
+	let padding = $state(0);
 
 	// Drag state
 	let isDragging = $state(false);
@@ -37,7 +40,6 @@
 
 	// Calculate handles (always axis-aligned, no rotation)
 	const handles = $derived(() => {
-		const padding = 4;
 		// Bounding box in local coordinates
 		const localX = rectX - padding;
 		const localY = rectY - padding;
@@ -45,14 +47,14 @@
 		const localHeight = rectHeight + padding * 2;
 
 		return [
-			{ id: 'top-left', x: localX, y: localY },
-			{ id: 'top', x: localX + localWidth / 2, y: localY },
-			{ id: 'top-right', x: localX + localWidth, y: localY },
-			{ id: 'right', x: localX + localWidth, y: localY + localHeight / 2 },
-			{ id: 'bottom-right', x: localX + localWidth, y: localY + localHeight },
-			{ id: 'bottom', x: localX + localWidth / 2, y: localY + localHeight },
-			{ id: 'bottom-left', x: localX, y: localY + localHeight },
-			{ id: 'left', x: localX, y: localY + localHeight / 2 }
+			{ id: 'top-left', x: localX, y: localY, opposite: 'bottom-right'},
+			{ id: 'top', x: localX + localWidth / 2, y: localY, opposite: 'bottom' },
+			{ id: 'top-right', x: localX + localWidth, y: localY, opposite: 'bottom-left' },
+			{ id: 'right', x: localX + localWidth, y: localY + localHeight / 2, opposite: 'left' },
+			{ id: 'bottom-right', x: localX + localWidth, y: localY + localHeight, opposite: 'top-left' },
+			{ id: 'bottom', x: localX + localWidth / 2, y: localY + localHeight, opposite: 'top' },
+			{ id: 'bottom-left', x: localX, y: localY + localHeight, opposite: 'top-right' },
+			{ id: 'left', x: localX, y: localY + localHeight / 2, opposite: 'right' }
 		];
 	});
 
@@ -86,133 +88,44 @@
 		const mouseGlobal = { x: currentX, y: currentY };
 
 		// 2. 핸들 타입에 따라 '고정점(Anchor)'을 로컬(Local) 좌표계에서 결정
+		let anchorLocalX: number;
+		let anchorLocalY: number;
 		//    (회전하기 전의 순수한 사각형 좌표 기준)
-		let anchor1LocalX: number, anchor1LocalY: number;
-		let anchor2LocalX: number = 0, anchor2LocalY: number = 0;
-		let useDoubleAnchor = false; // 변 핸들(Edge handle)인 경우 두 모서리를 고정점으로 사용
-
+		let oppositeHandle: string = handles().find((h) => h.id === dragHandle)?.opposite ?? '';
+		let oppositeHandleX: number = handles().find((h) => h.id === oppositeHandle)?.x ?? 0;
+		let oppositeHandleY: number = handles().find((h) => h.id === oppositeHandle)?.y ?? 0;
 		const initialCenterX = initialRect.x + initialRect.width / 2;
 		const initialCenterY = initialRect.y + initialRect.height / 2;
 
-		switch (dragHandle) {
-			case 'top-left': // 대각선 반대편인 bottom-right가 고정
-				anchor1LocalX = initialRect.x + initialRect.width;
-				anchor1LocalY = initialRect.y + initialRect.height;
-				break;
-			case 'top-right': // bottom-left 고정
-				anchor1LocalX = initialRect.x;
-				anchor1LocalY = initialRect.y + initialRect.height;
-				break;
-			case 'bottom-left': // top-right 고정
-				anchor1LocalX = initialRect.x + initialRect.width;
-				anchor1LocalY = initialRect.y;
-				break;
-			case 'bottom-right': // top-left 고정
-				anchor1LocalX = initialRect.x;
-				anchor1LocalY = initialRect.y;
-				break;
-			case 'top': // 아래쪽 변(bottom edge) 전체 고정 (bottom-left & bottom-right)
-				anchor1LocalX = initialRect.x + initialRect.width / 2;
-				anchor1LocalY = initialRect.y + initialRect.height;
-				break;
-			case 'bottom': // 위쪽 변(top edge) 전체 고정
-				anchor1LocalX = initialRect.x + initialRect.width / 2;
-				anchor1LocalY = initialRect.y;
-				break;
-			case 'left': // 오른쪽 변(right edge) 전체 고정
-				anchor1LocalX = initialRect.x + initialRect.width;
-				anchor1LocalY = initialRect.y + initialRect.height / 2;
-				break;
-			case 'right': // 왼쪽 변(left edge) 전체 고정
-				anchor1LocalX = initialRect.x;
-				anchor1LocalY = initialRect.y + initialRect.height / 2;
-				break;
-			default:
-				return;
-		}
-
 		// 3. 로컬 앵커를 전역(Global) 좌표로 변환 (초기 중심 기준 회전)
 		//    이 전역 앵커 좌표는 변형 중에도 화면상에서 절대 움직이지 않아야 함!
-		let anchorGlobalX: number, anchorGlobalY: number;
-
-		if (useDoubleAnchor) {
-			// 두 앵커의 전역 좌표를 각각 구하고, 그 중점을 실질적인 앵커로 사용
-			const anchor1Global = rotatePoint(anchor1LocalX, anchor1LocalY, initialCenterX, initialCenterY, initialRect.rotation);
-			const anchor2Global = rotatePoint(anchor2LocalX, anchor2LocalY, initialCenterX, initialCenterY, initialRect.rotation);
-			anchorGlobalX = (anchor1Global.x + anchor2Global.x) / 2;
-			anchorGlobalY = (anchor1Global.y + anchor2Global.y) / 2;
-		} else {
-			const anchorGlobal = rotatePoint(anchor1LocalX, anchor1LocalY, initialCenterX, initialCenterY, initialRect.rotation);
-			anchorGlobalX = anchorGlobal.x;
-			anchorGlobalY = anchorGlobal.y;
-		}
-
+		const anchorGlobal = rotatePoint(oppositeHandleX, oppositeHandleY, initialCenterX, initialCenterY, initialRect.rotation);
+		let anchorGlobalX: number = anchorGlobal.x;
+		let anchorGlobalY: number = anchorGlobal.y;
+		console.log('Anchor Global:', { x: anchorGlobalX, y: anchorGlobalY });
 		// 4. 새로운 중심점(New Center) 계산 (전역 좌표계)
 		//    기본적으로 (앵커 + 마우스) / 2 이지만, 변 핸들은 한 축이 고정됨
 		let newCenterGlobalX: number, newCenterGlobalY: number;
+		newCenterGlobalX = (anchorGlobalX + mouseGlobal.x) / 2;
+		newCenterGlobalY = (anchorGlobalY + mouseGlobal.y) / 2;
 
-		if (useDoubleAnchor) {
-			// 변 핸들: 고정된 변의 축은 중심도 고정되어야 함 (흔들림 방지)
-			const isVerticalEdge = Math.abs(anchor1LocalX - anchor2LocalX) < 0.01;
-			if (isVerticalEdge) {
-				// 수직 변(좌/우) 핸들: Y축 중심은 고정, X축만 변경
-				newCenterGlobalX = (anchorGlobalX + mouseGlobal.x) / 2;
-				newCenterGlobalY = anchorGlobalY; 
-			} else {
-				// 수평 변(상/하) 핸들: X축 중심은 고정, Y축만 변경
-				newCenterGlobalX = anchorGlobalX;
-				newCenterGlobalY = (anchorGlobalY + mouseGlobal.y) / 2;
-			}
-		} else {
-			// 모서리 핸들: X, Y 모두 변경
-			newCenterGlobalX = (anchorGlobalX + mouseGlobal.x) / 2;
-			newCenterGlobalY = (anchorGlobalY + mouseGlobal.y) / 2;
-		}
+		// 5. Anchor와 마우스 위치사이의 거리 계산
+		let distance = Math.sqrt(Math.pow(mouseGlobal.x - anchorGlobalX, 2) + Math.pow(mouseGlobal.y - anchorGlobalY, 2));
 
-		// 5. 로컬 좌표계로 복귀 (역회전)
-		//    새로운 중심을 기준으로, 전역 좌표들을 다시 로컬 좌표로 변환 (회전을 풂)
-		const newCenterLocalX = newCenterGlobalX;
-		const newCenterLocalY = newCenterGlobalY;
+		// 1) 대각선 절반 벡터 (중점 -> 한 꼭짓점)
+		const halfDx = mouseGlobal.x - newCenterGlobalX;
+		const halfDy = mouseGlobal.y - newCenterGlobalY;
 
-		// 앵커와 드래그(마우스) 위치를 새 중심 기준으로 역회전(-rotation)
-		const anchorNewLocal = rotatePoint(anchorGlobalX, anchorGlobalY, newCenterLocalX, newCenterLocalY, -initialRect.rotation);
-		const dragNewLocal = rotatePoint(mouseGlobal.x, mouseGlobal.y, newCenterLocalX, newCenterLocalY, -initialRect.rotation);
+		// 2) 이 벡터를 -aDeg 만큼 역회전하면 (w/2, h/2)
+		const local = rotatePoint(halfDx, halfDy, 0, 0, -initialRect.rotation);
 
-		// 6. 최종 크기 계산 (로컬 좌표계)
-		let newWidth: number, newHeight: number;
-
-		if (useDoubleAnchor) {
-			// 변 핸들의 경우, 고정된 변의 길이를 정확히 계산하기 위해 두 앵커를 모두 역회전
-			const anchor1Global = rotatePoint(anchor1LocalX, anchor1LocalY, initialCenterX, initialCenterY, initialRect.rotation);
-			const anchor2Global = rotatePoint(anchor2LocalX, anchor2LocalY, initialCenterX, initialCenterY, initialRect.rotation);
-			
-			const anchor1NewLocal = rotatePoint(anchor1Global.x, anchor1Global.y, newCenterLocalX, newCenterLocalY, -initialRect.rotation);
-			const anchor2NewLocal = rotatePoint(anchor2Global.x, anchor2Global.y, newCenterLocalX, newCenterLocalY, -initialRect.rotation);
-
-			const isVerticalEdge = Math.abs(anchor1NewLocal.x - anchor2NewLocal.x) < 0.01;
-			
-			if (isVerticalEdge) {
-				// 수직 변: 높이는 고정된 변의 길이, 너비는 드래그 거리
-				newHeight = Math.abs(anchor2NewLocal.y - anchor1NewLocal.y);
-				newWidth = Math.abs(dragNewLocal.x - anchorNewLocal.x);
-			} else {
-				// 수평 변: 너비는 고정된 변의 길이, 높이는 드래그 거리
-				newWidth = Math.abs(anchor2NewLocal.x - anchor1NewLocal.x);
-				newHeight = Math.abs(dragNewLocal.y - anchorNewLocal.y);
-			}
-		} else {
-			// 모서리 핸들: 단순히 앵커와 드래그 지점 사이의 거리
-			newWidth = Math.abs(dragNewLocal.x - anchorNewLocal.x);
-			newHeight = Math.abs(dragNewLocal.y - anchorNewLocal.y);
-		}
-
-		// Minimum constraints
-		if (newWidth < 20) newWidth = 20;
-		if (newHeight < 20) newHeight = 20;
+		// 3) 폭/높이는 절대값 * 2
+		let newWidth: number = Math.abs(local.x) * 2;
+		let newHeight: number = Math.abs(local.y) * 2;
 
 		// Calculate new top-left
-		const newX = newCenterLocalX - newWidth / 2;
-		const newY = newCenterLocalY - newHeight / 2;
+		let newX: number = newCenterGlobalX - newWidth / 2;
+		let newY: number = newCenterGlobalY - newHeight / 2;
 
 		console.log('New rect:', { x: newX, y: newY, width: newWidth, height: newHeight });
 
@@ -284,6 +197,13 @@
                     <div>{handle.id}: ({Math.round(handle.x)}, {Math.round(handle.y)})</div>
                 {/each}
             </div>
+			<div class="flex flex-col text-xs ml-4">
+                <strong>Handle Positions (Global):</strong>
+                {#each handles() as handle}
+					{@const anchorGlobal = rotatePoint(handle.x, handle.y, centerX, centerY, rotation)}
+                    <div>{handle.id}: ({Math.round(anchorGlobal.x)}, {Math.round(anchorGlobal.y)})</div>
+                {/each}
+            </div>
         </div>
 		<div class="mt-2">
 			<button 
@@ -293,7 +213,7 @@
 				Reset Rotation
 			</button>
 			<button 
-				onclick={() => { rectX = 200; rectY = 150; rectWidth = 200; rectHeight = 100; rotation = 0; }}
+				onclick={() => { rectX = 300; rectY = 200; rectWidth = 200; rectHeight = 100; rotation = 0; }}
 				class="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600"
 			>
 				Reset All
