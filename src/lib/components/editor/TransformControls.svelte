@@ -1,14 +1,18 @@
 <script lang="ts">
 	import type { SVGElement, TransformHandle, Point } from '$lib/types';
 	import { editorStore } from '$lib/stores/editor.svelte';
+	import { transformStore } from '$lib/stores/transform.svelte';
 	import { getMousePosition } from '$lib/utils/svg';
 
 	interface Props {
 		element: SVGElement;
 		svgElement: SVGSVGElement;
+		onStartTextEdit?: (id: string) => void;
+		onEndTextEdit?: () => void;
+		isTextEditing?: boolean;
 	}
 
-	let { element, svgElement }: Props = $props();
+	let { element, svgElement, onStartTextEdit, onEndTextEdit, isTextEditing = false }: Props = $props();
 
 	let isDragging = $state(false);
 	let isRotating = $state(false);
@@ -16,6 +20,18 @@
 	let dragStart = $state({ x: 0, y: 0 });
 	let initialBounds = $state({ x: 0, y: 0, width: 0, height: 0 });
 	let initialElement = $state<any>(null);
+
+	// 텍스트 이동용 상태
+	let isMovingText = $state(false);
+	let textMoveStart = $state({ x: 0, y: 0 });
+	let hasMovedText = $state(false);
+
+	// 드래그 중 고정된 회전 중심 (Rectangle용)
+	let rotateCenterX = $state(0);
+	let rotateCenterY = $state(0);
+
+	// 최소 크기 제한
+	const MIN_SIZE = 10;
 
 	const bounds = $derived(() => {
 		const { x, y } = element.transform;
@@ -61,6 +77,16 @@
 				width: width + padding * 2,
 				height: height + padding * 2
 			};
+		} else if (element.type === 'text') {
+			// Text는 Rectangle과 동일한 좌상단 기준 좌표계
+			width = element.width;
+			height = element.height;
+			return {
+				x: x - padding,
+				y: y - padding,
+				width: width + padding * 2,
+				height: height + padding * 2
+			};
 		}
 
 		return { x, y, width, height };
@@ -92,16 +118,55 @@
 
 	const handleMouseDown = (handle: TransformHandle, e: MouseEvent) => {
 		e.stopPropagation();
+		
+		// 텍스트 편집 중이면 편집 종료
+		if (element.type === 'text') {
+			onEndTextEdit?.();
+		}
+		
 		isDragging = true;
 		dragHandle = handle;
 		const svgPoint = getMousePosition(e, svgElement);
 		dragStart = { x: svgPoint.x, y: svgPoint.y };
 		initialBounds = { ...bounds() };
 		initialElement = JSON.parse(JSON.stringify(element));
+
+		// Rectangle: 드래그 시작 시 현재 중심을 회전 중심으로 고정
+		if (element.type === 'rectangle') {
+			const center = centerPoint();
+			rotateCenterX = center.x;
+			rotateCenterY = center.y;
+			// transformStore에도 공유 (Rectangle 렌더링과 동기화)
+			transformStore.setRotateCenter(center.x, center.y);
+		}
+
+		// Ellipse: 드래그 시작 시 현재 중심을 회전 중심으로 고정
+		// Ellipse는 중심 기준 좌표계이므로 transform.x/y가 회전 중심
+		if (element.type === 'ellipse') {
+			rotateCenterX = element.transform.x;
+			rotateCenterY = element.transform.y;
+			// transformStore에도 공유 (Ellipse 렌더링과 동기화)
+			transformStore.setRotateCenter(element.transform.x, element.transform.y);
+		}
+
+		// Text: Rectangle과 동일한 좌상단 기준 좌표계
+		if (element.type === 'text') {
+			const center = centerPoint();
+			rotateCenterX = center.x;
+			rotateCenterY = center.y;
+			// transformStore에도 공유 (Text 렌더링과 동기화)
+			transformStore.setRotateCenter(center.x, center.y);
+		}
 	};
 
 	const handleRotateMouseDown = (e: MouseEvent) => {
 		e.stopPropagation();
+		
+		// 텍스트 편집 중이면 편집 종료
+		if (element.type === 'text') {
+			onEndTextEdit?.();
+		}
+		
 		isRotating = true;
 		const svgPoint = getMousePosition(e, svgElement);
 		dragStart = { x: svgPoint.x, y: svgPoint.y };
@@ -109,6 +174,30 @@
 	};
 
 	const handleMouseMove = (e: MouseEvent) => {
+		// 텍스트 이동 처리
+		if (isMovingText) {
+			const currentPoint = getMousePosition(e, svgElement);
+			const deltaX = currentPoint.x - textMoveStart.x;
+			const deltaY = currentPoint.y - textMoveStart.y;
+			
+			// 최소 이동 거리 확인 (3px 이상 움직여야 드래그로 인식)
+			if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+				hasMovedText = true;
+			}
+			
+			if (hasMovedText) {
+				editorStore.updateElement(element.id, {
+					transform: {
+						...element.transform,
+						x: element.transform.x + deltaX,
+						y: element.transform.y + deltaY
+					}
+				});
+				textMoveStart = currentPoint;
+			}
+			return;
+		}
+		
 		if (!isDragging && !isRotating) return;
 
 		if (isRotating) {
@@ -119,6 +208,106 @@
 	};
 
 	const handleMouseUp = () => {
+		// 텍스트 이동 완료 처리
+		if (isMovingText) {
+			if (!hasMovedText) {
+				// 이동 없이 클릭만 했으면 편집 모드 진입
+				onStartTextEdit?.(element.id);
+			}
+			isMovingText = false;
+			hasMovedText = false;
+			return;
+		}
+		
+		// Rectangle: 드래그 종료 시 회전 중심 변경에 따른 좌표 보정
+		if (element.type === 'rectangle' && isDragging) {
+			const rotation = element.transform.rotation;
+			
+			// 1. 이전 회전 중심 저장
+			const oldCenter: Point = { x: rotateCenterX, y: rotateCenterY };
+			
+			// 2. 새 회전 중심 = 현재 로컬 중심을 글로벌 좌표로 변환
+			const localCenterX = element.transform.x + element.width / 2;
+			const localCenterY = element.transform.y + element.height / 2;
+			const newCenter = rotatePoint(localCenterX, localCenterY, oldCenter.x, oldCenter.y, rotation);
+			
+			// 3. top-left의 현재 글로벌 위치 계산 (이전 회전 중심 기준)
+			const topLeftGlobal = rotatePoint(element.transform.x, element.transform.y, oldCenter.x, oldCenter.y, rotation);
+			
+			// 4. 새 회전 중심에서 같은 글로벌 위치가 되는 로컬 좌표 계산 (역회전)
+			const newTopLeftLocal = rotatePoint(topLeftGlobal.x, topLeftGlobal.y, newCenter.x, newCenter.y, -rotation);
+			
+			// 5. 보정된 값으로 업데이트
+			editorStore.updateElement(element.id, {
+				transform: { ...element.transform, x: newTopLeftLocal.x, y: newTopLeftLocal.y }
+			});
+			
+			// 6. 회전 중심 업데이트 (로컬 상태)
+			rotateCenterX = newCenter.x;
+			rotateCenterY = newCenter.y;
+		}
+
+		// Ellipse: 드래그 종료 시 회전 중심 변경에 따른 좌표 보정
+		// Ellipse는 중심 기준 좌표계이므로 transform.x/y가 곧 중심
+		if (element.type === 'ellipse' && isDragging) {
+			const rotation = element.transform.rotation;
+			
+			// 1. 이전 회전 중심 저장
+			const oldCenter: Point = { x: rotateCenterX, y: rotateCenterY };
+			
+			// 2. 새 회전 중심 = 현재 로컬 중심(transform.x/y)을 글로벌 좌표로 변환
+			const localCenterX = element.transform.x;
+			const localCenterY = element.transform.y;
+			const newCenter = rotatePoint(localCenterX, localCenterY, oldCenter.x, oldCenter.y, rotation);
+			
+			// 3. 현재 중심의 글로벌 위치 계산 (이전 회전 중심 기준)
+			const centerGlobal = rotatePoint(localCenterX, localCenterY, oldCenter.x, oldCenter.y, rotation);
+			
+			// 4. 새 회전 중심에서 같은 글로벌 위치가 되는 로컬 좌표 계산 (역회전)
+			const newCenterLocal = rotatePoint(centerGlobal.x, centerGlobal.y, newCenter.x, newCenter.y, -rotation);
+			
+			// 5. 보정된 값으로 업데이트
+			editorStore.updateElement(element.id, {
+				transform: { ...element.transform, x: newCenterLocal.x, y: newCenterLocal.y }
+			});
+			
+			// 6. 회전 중심 업데이트 (로컬 상태)
+			rotateCenterX = newCenter.x;
+			rotateCenterY = newCenter.y;
+		}
+
+		// Text: Rectangle과 동일한 좌표 보정 로직
+		if (element.type === 'text' && isDragging) {
+			const rotation = element.transform.rotation;
+			
+			// 1. 이전 회전 중심 저장
+			const oldCenter: Point = { x: rotateCenterX, y: rotateCenterY };
+			
+			// 2. 새 회전 중심 = 현재 로컬 중심을 글로벌 좌표로 변환
+			const localCenterX = element.transform.x + element.width / 2;
+			const localCenterY = element.transform.y + element.height / 2;
+			const newCenter = rotatePoint(localCenterX, localCenterY, oldCenter.x, oldCenter.y, rotation);
+			
+			// 3. top-left의 현재 글로벌 위치 계산 (이전 회전 중심 기준)
+			const topLeftGlobal = rotatePoint(element.transform.x, element.transform.y, oldCenter.x, oldCenter.y, rotation);
+			
+			// 4. 새 회전 중심에서 같은 글로벌 위치가 되는 로컬 좌표 계산 (역회전)
+			const newTopLeftLocal = rotatePoint(topLeftGlobal.x, topLeftGlobal.y, newCenter.x, newCenter.y, -rotation);
+			
+			// 5. 보정된 값으로 업데이트
+			editorStore.updateElement(element.id, {
+				transform: { ...element.transform, x: newTopLeftLocal.x, y: newTopLeftLocal.y }
+			});
+			
+			// 6. 회전 중심 업데이트 (로컬 상태)
+			rotateCenterX = newCenter.x;
+			rotateCenterY = newCenter.y;
+		}
+
+		// transformStore 정리 (도형 렌더링과 동기화 해제)
+		transformStore.rotateCenterX = null;
+		transformStore.rotateCenterY = null;
+
 		isDragging = false;
 		isRotating = false;
 		dragHandle = null;
@@ -287,271 +476,99 @@
 		// console.log('Opposite Handle Position:', oppositeHandlePos);
 
 		if (element.type === 'circle') {
-			// Circle uses absolute mouse position (no rotation compensation needed)
-			handleCircleResize(currentPoint, oppositeHandlePos);
+			// Circle: 중심 고정, 반지름만 변경
+			handleCircleResize(currentPoint);
 		} else if (element.type === 'ellipse') {
-			// Ellipse uses absolute mouse position (no rotation compensation needed)
-			handleEllipseResize(currentPoint, oppositeHandlePos);
-		} else {
-			if (element.type === 'rectangle') {
-				// Rectangle uses absolute mouse position to handle rotation correctly
-				handleRectangleResize(currentPoint);
-			} else if (element.type === 'line') {
-				handleLineResize(rotatedDx, rotatedDy);
-			}
+			// Ellipse uses absolute mouse position to handle rotation correctly
+			handleEllipseResize(currentPoint);
+		} else if (element.type === 'rectangle') {
+			// Rectangle uses absolute mouse position to handle rotation correctly
+			handleRectangleResize(currentPoint);
+		} else if (element.type === 'text') {
+			// Text: Rectangle과 동일한 방식
+			handleTextResize(currentPoint);
+		} else if (element.type === 'line') {
+			// Line: 끝점을 마우스 위치로 직접 이동
+			handleLineResize(currentPoint);
 		}
 	};
 
-	const handleRectangleResize = (dragGlobalPos: Point) => {
-		if (element.type !== 'rectangle') return;
+	/**
+	 * Rectangle 크기 조절 핸들러 (검증된 로직 적용)
+	 * 
+	 * 핵심 원리:
+	 * 1. 마우스 글로벌 좌표를 로컬 좌표로 변환 (회전 중심 기준)
+	 * 2. 현재 핸들의 widthId/heightId로 반대쪽 핸들의 로컬 좌표 참조
+	 * 3. left/top 핸들: newX/newY 조정 + width/height 계산
+	 * 4. right/bottom 핸들: width/height만 계산
+	 */
+	const handleRectangleResize = (mouseGlobalPos: Point) => {
+		if (element.type !== 'rectangle' || !dragHandle) return;
 
-		console.log('=== Rectangle Resize (Global Anchor Point Method) ===');
-		console.log('Drag Handle:', dragHandle);
-		console.log('Drag Global Position:', dragGlobalPos);
+		const rotation = element.transform.rotation;
+		const rotateCenter: Point = { x: rotateCenterX, y: rotateCenterY };
 
-		// Initial state (local coordinates)
-		const initialX = initialElement.transform.x;
-		const initialY = initialElement.transform.y;
-		const initialWidth = initialElement.width;
-		const initialHeight = initialElement.height;
-		const rotation = initialElement.transform.rotation;
+		// 1. 마우스 글로벌 좌표를 로컬 좌표로 변환 (회전의 역변환)
+		const mouseLocalPos = rotatePoint(mouseGlobalPos.x, mouseGlobalPos.y, rotateCenter.x, rotateCenter.y, -rotation);
 
-		// 1. Calculate initial center (local coordinates)
-		const initialCenterX = initialX + initialWidth / 2;
-		const initialCenterY = initialY + initialHeight / 2;
+		// 2. 현재 핸들의 로컬 좌표 기준 계산 (padding 제외)
+		// bounds()는 padding이 포함되어 있으므로, element의 실제 좌표 사용
+		const rectX = element.transform.x;
+		const rectY = element.transform.y;
+		const rectWidth = element.width;
+		const rectHeight = element.height;
 
-		// 2. Determine opposite handle(s) position in LOCAL coordinates
-		let anchorLocalX: number;
-		let anchorLocalY: number;
-		let useDoubleAnchor = false;
-		let anchor2LocalX: number = 0;
-		let anchor2LocalY: number = 0;
+		// 로컬 좌표계에서의 8개 핸들 위치 (padding 없이)
+		const localHandles: Record<TransformHandle, { x: number; y: number }> = {
+			'top-left': { x: rectX, y: rectY },
+			'top': { x: rectX + rectWidth / 2, y: rectY },
+			'top-right': { x: rectX + rectWidth, y: rectY },
+			'right': { x: rectX + rectWidth, y: rectY + rectHeight / 2 },
+			'bottom-right': { x: rectX + rectWidth, y: rectY + rectHeight },
+			'bottom': { x: rectX + rectWidth / 2, y: rectY + rectHeight },
+			'bottom-left': { x: rectX, y: rectY + rectHeight },
+			'left': { x: rectX, y: rectY + rectHeight / 2 },
+			'rotate': { x: rectX + rectWidth / 2, y: rectY }
+		};
 
-		switch (dragHandle) {
-			case 'top-left':
-				anchorLocalX = initialX + initialWidth;
-				anchorLocalY = initialY + initialHeight;
-				break;
-			case 'top-right':
-				anchorLocalX = initialX;
-				anchorLocalY = initialY + initialHeight;
-				break;
-			case 'bottom-left':
-				anchorLocalX = initialX + initialWidth;
-				anchorLocalY = initialY;
-				break;
-			case 'bottom-right':
-				anchorLocalX = initialX;
-				anchorLocalY = initialY;
-				break;
-			case 'top':
-				// Fix bottom edge: bottom-left + bottom-right
-				useDoubleAnchor = true;
-				anchorLocalX = initialX;
-				anchorLocalY = initialY + initialHeight;
-				anchor2LocalX = initialX + initialWidth;
-				anchor2LocalY = initialY + initialHeight;
-				break;
-			case 'bottom':
-				// Fix top edge: top-left + top-right
-				useDoubleAnchor = true;
-				anchorLocalX = initialX;
-				anchorLocalY = initialY;
-				anchor2LocalX = initialX + initialWidth;
-				anchor2LocalY = initialY;
-				break;
-			case 'left':
-				// Fix right edge: top-right + bottom-right
-				useDoubleAnchor = true;
-				anchorLocalX = initialX + initialWidth;
-				anchorLocalY = initialY;
-				anchor2LocalX = initialX + initialWidth;
-				anchor2LocalY = initialY + initialHeight;
-				break;
-			case 'right':
-				// Fix left edge: top-left + bottom-left
-				useDoubleAnchor = true;
-				anchorLocalX = initialX;
-				anchorLocalY = initialY;
-				anchor2LocalX = initialX;
-				anchor2LocalY = initialY + initialHeight;
-				break;
-			default:
-				return;
-		}
+		// 현재 핸들의 widthId, heightId 찾기
+		const currentHandleInfo = handles().find(h => h.type === dragHandle);
+		if (!currentHandleInfo) return;
 
-		// 3. Transform anchor(s) to GLOBAL coordinates (rotate around initial center)
-		let anchorGlobalX: number;
-		let anchorGlobalY: number;
+		let newX = rectX;
+		let newY = rectY;
+		let newWidth = rectWidth;
+		let newHeight = rectHeight;
 
-		if (useDoubleAnchor) {
-			// For edge handles: use midpoint of two fixed corners
-			const anchor1Global = rotatePoint(
-				anchorLocalX,
-				anchorLocalY,
-				initialCenterX,
-				initialCenterY,
-				rotation
-			);
-			const anchor2Global = rotatePoint(
-				anchor2LocalX,
-				anchor2LocalY,
-				initialCenterX,
-				initialCenterY,
-				rotation
-			);
-			
-			// Use midpoint as the effective anchor
-			anchorGlobalX = (anchor1Global.x + anchor2Global.x) / 2;
-			anchorGlobalY = (anchor1Global.y + anchor2Global.y) / 2;
-			
-			console.log('Anchor1 Local:', { x: anchorLocalX, y: anchorLocalY });
-			console.log('Anchor1 Global:', anchor1Global);
-			console.log('Anchor2 Local:', { x: anchor2LocalX, y: anchor2LocalY });
-			console.log('Anchor2 Global:', anchor2Global);
-			console.log('Fixed Edge Center (Global):', { x: anchorGlobalX, y: anchorGlobalY });
-		} else {
-			// For corner handles: single anchor point
-			const anchorGlobal = rotatePoint(
-				anchorLocalX,
-				anchorLocalY,
-				initialCenterX,
-				initialCenterY,
-				rotation
-			);
-			anchorGlobalX = anchorGlobal.x;
-			anchorGlobalY = anchorGlobal.y;
-			
-			console.log('Anchor Local:', { x: anchorLocalX, y: anchorLocalY });
-			console.log('Anchor Global (Fixed):', { x: anchorGlobalX, y: anchorGlobalY });
-		}
-
-		// 4. Calculate new center in GLOBAL coordinates
-		let newCenterGlobalX: number;
-		let newCenterGlobalY: number;
-
-		if (useDoubleAnchor) {
-			// For edge handles: only one dimension changes, the other is fixed
-			// Determine if it's a vertical or horizontal edge
-			const isVerticalEdge = Math.abs(anchorLocalX - anchor2LocalX) < 0.01;
-			
-			if (isVerticalEdge) {
-				// Vertical edge (left/right handle): X changes, Y is fixed
-				newCenterGlobalX = (anchorGlobalX + dragGlobalPos.x) / 2;
-				newCenterGlobalY = anchorGlobalY;  // Fixed at anchor midpoint
+		// 3. Width 계산
+		if (currentHandleInfo.widthId) {
+			const widthHandlePos = localHandles[currentHandleInfo.widthId];
+			if (dragHandle.includes('left')) {
+				// LEFT 계열 핸들: 오른쪽 경계를 넘어가지 않도록 제한
+				const maxX = widthHandlePos.x - MIN_SIZE;
+				newX = Math.min(mouseLocalPos.x, maxX);
+				newWidth = widthHandlePos.x - newX;
 			} else {
-				// Horizontal edge (top/bottom handle): Y changes, X is fixed
-				newCenterGlobalX = anchorGlobalX;  // Fixed at anchor midpoint
-				newCenterGlobalY = (anchorGlobalY + dragGlobalPos.y) / 2;
+				// RIGHT 계열 핸들: 최소 크기 이상 유지
+				newWidth = Math.max(mouseLocalPos.x - widthHandlePos.x, MIN_SIZE);
 			}
-		} else {
-			// Corner handle: both dimensions change
-			newCenterGlobalX = (anchorGlobalX + dragGlobalPos.x) / 2;
-			newCenterGlobalY = (anchorGlobalY + dragGlobalPos.y) / 2;
 		}
 
-		console.log('New Center Global:', { x: newCenterGlobalX, y: newCenterGlobalY });
-
-		// 5. Transform both handles to LOCAL coordinates (rotate around NEW center)
-		// Since the rectangle hasn't rotated yet, new center in global = new center in local
-		const newCenterLocalX = newCenterGlobalX;
-		const newCenterLocalY = newCenterGlobalY;
-
-		// Transform anchor back to local (reverse rotation around new center)
-		const anchorNewLocal = rotatePoint(
-			anchorGlobalX,
-			anchorGlobalY,
-			newCenterLocalX,
-			newCenterLocalY,
-			-rotation
-		);
-
-		// Transform drag handle to local (reverse rotation around new center)
-		const dragNewLocal = rotatePoint(
-			dragGlobalPos.x,
-			dragGlobalPos.y,
-			newCenterLocalX,
-			newCenterLocalY,
-			-rotation
-		);
-
-		console.log('Anchor New Local:', anchorNewLocal);
-		console.log('Drag New Local:', dragNewLocal);
-
-		// 6. Calculate new rectangle dimensions in LOCAL coordinates
-		let newWidth: number;
-		let newHeight: number;
-
-		if (useDoubleAnchor) {
-			// For edge handles: need to calculate the fixed dimension correctly
-			// Transform both fixed corners back to local coordinates
-			const anchor1Global = rotatePoint(
-				anchorLocalX,
-				anchorLocalY,
-				initialCenterX,
-				initialCenterY,
-				rotation
-			);
-			const anchor2Global = rotatePoint(
-				anchor2LocalX,
-				anchor2LocalY,
-				initialCenterX,
-				initialCenterY,
-				rotation
-			);
-			
-			const anchor1NewLocal = rotatePoint(
-				anchor1Global.x,
-				anchor1Global.y,
-				newCenterLocalX,
-				newCenterLocalY,
-				-rotation
-			);
-			const anchor2NewLocal = rotatePoint(
-				anchor2Global.x,
-				anchor2Global.y,
-				newCenterLocalX,
-				newCenterLocalY,
-				-rotation
-			);
-
-			// Calculate which dimension is fixed based on the two corners
-			// If X coordinates are the same, it's a vertical edge (width changes, height fixed)
-			// If Y coordinates are the same, it's a horizontal edge (height changes, width fixed)
-			const isVerticalEdge = Math.abs(anchor1NewLocal.x - anchor2NewLocal.x) < 0.01;
-			
-			if (isVerticalEdge) {
-				// Vertical edge (left or right handle): height is fixed
-				newHeight = Math.abs(anchor2NewLocal.y - anchor1NewLocal.y);
-				newWidth = Math.abs(dragNewLocal.x - anchorNewLocal.x);
+		// 4. Height 계산
+		if (currentHandleInfo.heightId) {
+			const heightHandlePos = localHandles[currentHandleInfo.heightId];
+			if (dragHandle.includes('top')) {
+				// TOP 계열 핸들: 아래쪽 경계를 넘어가지 않도록 제한
+				const maxY = heightHandlePos.y - MIN_SIZE;
+				newY = Math.min(mouseLocalPos.y, maxY);
+				newHeight = heightHandlePos.y - newY;
 			} else {
-				// Horizontal edge (top or bottom handle): width is fixed
-				newWidth = Math.abs(anchor2NewLocal.x - anchor1NewLocal.x);
-				newHeight = Math.abs(dragNewLocal.y - anchorNewLocal.y);
+				// BOTTOM 계열 핸들: 최소 크기 이상 유지
+				newHeight = Math.max(mouseLocalPos.y - heightHandlePos.y, MIN_SIZE);
 			}
-			
-			console.log('Fixed Edge Corners (New Local):', { anchor1: anchor1NewLocal, anchor2: anchor2NewLocal });
-			console.log('Is Vertical Edge:', isVerticalEdge);
-		} else {
-			// Corner handle: both dimensions change
-			newWidth = Math.abs(dragNewLocal.x - anchorNewLocal.x);
-			newHeight = Math.abs(dragNewLocal.y - anchorNewLocal.y);
 		}
 
-		// Minimum size constraints
-		if (newWidth < 10) newWidth = 10;
-		if (newHeight < 10) newHeight = 10;
-
-		// 7. Calculate new top-left position (new center - half size)
-		const newX = newCenterLocalX - newWidth / 2;
-		const newY = newCenterLocalY - newHeight / 2;
-
-		console.log('New Rectangle:', { x: newX, y: newY, width: newWidth, height: newHeight });
-		console.log('Center moved by:', {
-			dx: newCenterLocalX - initialCenterX,
-			dy: newCenterLocalY - initialCenterY
-		});
-
+		// 5. 업데이트
 		editorStore.updateElement(element.id, {
 			transform: { ...element.transform, x: newX, y: newY },
 			width: newWidth,
@@ -559,205 +576,277 @@
 		});
 	};
 
-	const handleCircleResize = (dragHandlePos: Point, oppositePos: Point) => {
-		if (element.type !== 'circle') return;
+	/**
+	 * Text 크기 조절 핸들러 (Rectangle과 동일한 로직)
+	 * 
+	 * Text의 특성:
+	 * - Rectangle과 동일한 좌상단 기준 좌표계
+	 * - width, height 속성 사용
+	 */
+	const handleTextResize = (mouseGlobalPos: Point) => {
+		if (element.type !== 'text' || !dragHandle) return;
 
-		console.log('=== Circle Resize (Anchor Point Method) ===');
-		console.log('Drag Handle:', dragHandle);
-		console.log('Drag Handle Position:', dragHandlePos);
-		console.log('Opposite Handle Position (Fixed):', oppositePos);
+		const rotation = element.transform.rotation;
+		const rotateCenter: Point = { x: rotateCenterX, y: rotateCenterY };
 
-		// Calculate new center as midpoint between drag handle and opposite handle
-		const newX = (dragHandlePos.x + oppositePos.x) / 2;
-		const newY = (dragHandlePos.y + oppositePos.y) / 2;
+		// 1. 마우스 글로벌 좌표를 로컬 좌표로 변환 (회전의 역변환)
+		const mouseLocalPos = rotatePoint(mouseGlobalPos.x, mouseGlobalPos.y, rotateCenter.x, rotateCenter.y, -rotation);
 
-		// Calculate new radius based on handle type
-		let newRadius: number;
+		// 2. 현재 핸들의 로컬 좌표 기준 계산 (padding 제외)
+		const textX = element.transform.x;
+		const textY = element.transform.y;
+		const textWidth = element.width;
+		const textHeight = element.height;
 
-		switch (dragHandle) {
-			case 'top-left':
-			case 'top-right':
-			case 'bottom-left':
-			case 'bottom-right':
-				// Corner handles: use diagonal distance / 2
-				const diagonalDist = Math.sqrt(
-					Math.pow(dragHandlePos.x - oppositePos.x, 2) +
-					Math.pow(dragHandlePos.y - oppositePos.y, 2)
-				);
-				newRadius = diagonalDist / 2;
-				break;
+		// 로컬 좌표계에서의 8개 핸들 위치 (padding 없이)
+		const localHandles: Record<TransformHandle, { x: number; y: number }> = {
+			'top-left': { x: textX, y: textY },
+			'top': { x: textX + textWidth / 2, y: textY },
+			'top-right': { x: textX + textWidth, y: textY },
+			'right': { x: textX + textWidth, y: textY + textHeight / 2 },
+			'bottom-right': { x: textX + textWidth, y: textY + textHeight },
+			'bottom': { x: textX + textWidth / 2, y: textY + textHeight },
+			'bottom-left': { x: textX, y: textY + textHeight },
+			'left': { x: textX, y: textY + textHeight / 2 },
+			'rotate': { x: textX + textWidth / 2, y: textY }
+		};
 
-			case 'top':
-			case 'bottom':
-				// Vertical handles: use vertical distance / 2
-				newRadius = Math.abs(dragHandlePos.y - oppositePos.y) / 2;
-				break;
+		// 현재 핸들의 widthId, heightId 찾기
+		const currentHandleInfo = handles().find(h => h.type === dragHandle);
+		if (!currentHandleInfo) return;
 
-			case 'left':
-			case 'right':
-				// Horizontal handles: use horizontal distance / 2
-				newRadius = Math.abs(dragHandlePos.x - oppositePos.x) / 2;
-				break;
+		let newX = textX;
+		let newY = textY;
+		let newWidth = textWidth;
+		let newHeight = textHeight;
 
-			default:
-				newRadius = initialElement.radius;
+		// 3. Width 계산
+		if (currentHandleInfo.widthId) {
+			const widthHandlePos = localHandles[currentHandleInfo.widthId];
+			if (dragHandle.includes('left')) {
+				// LEFT 계열 핸들: 오른쪽 경계를 넘어가지 않도록 제한
+				const maxX = widthHandlePos.x - MIN_SIZE;
+				newX = Math.min(mouseLocalPos.x, maxX);
+				newWidth = widthHandlePos.x - newX;
+			} else {
+				// RIGHT 계열 핸들: 최소 크기 이상 유지
+				newWidth = Math.max(mouseLocalPos.x - widthHandlePos.x, MIN_SIZE);
+			}
 		}
 
-		// Minimum radius constraint
-		const finalRadius = Math.max(5, newRadius);
+		// 4. Height 계산
+		if (currentHandleInfo.heightId) {
+			const heightHandlePos = localHandles[currentHandleInfo.heightId];
+			if (dragHandle.includes('top')) {
+				// TOP 계열 핸들: 아래쪽 경계를 넘어가지 않도록 제한
+				const maxY = heightHandlePos.y - MIN_SIZE;
+				newY = Math.min(mouseLocalPos.y, maxY);
+				newHeight = heightHandlePos.y - newY;
+			} else {
+				// BOTTOM 계열 핸들: 최소 크기 이상 유지
+				newHeight = Math.max(mouseLocalPos.y - heightHandlePos.y, MIN_SIZE);
+			}
+		}
 
-		console.log('New Center:', { x: newX, y: newY });
-		console.log('New Radius:', finalRadius);
-		console.log('Center moved by:', {
-			dx: newX - initialElement.transform.x,
-			dy: newY - initialElement.transform.y
-		});
-
+		// 5. 업데이트
 		editorStore.updateElement(element.id, {
 			transform: { ...element.transform, x: newX, y: newY },
+			width: newWidth,
+			height: newHeight
+		});
+	};
+
+	/**
+	 * Circle 크기 조절 핸들러
+	 * 
+	 * 원의 특성:
+	 * - 반대쪽 핸들 위치 고정 (드래그한 핸들 방향으로만 크기 변경)
+	 * - 중심과 반지름이 함께 조정됨
+	 * - 상하좌우 핸들만 사용 (코너 핸들 없음)
+	 * - 회전 불필요 (회전해도 동일한 형태)
+	 */
+	const handleCircleResize = (dragHandlePos: Point) => {
+		if (element.type !== 'circle' || !dragHandle) return;
+
+		const cx = element.transform.x;
+		const cy = element.transform.y;
+		const radius = element.radius;
+
+		let newCx = cx;
+		let newCy = cy;
+		let newRadius = radius;
+
+		switch (dragHandle) {
+			case 'left': {
+				// 오른쪽 핸들 위치 고정
+				const oppositeX = cx + radius;
+				newCx = (dragHandlePos.x + oppositeX) / 2;
+				newRadius = Math.abs(oppositeX - dragHandlePos.x) / 2;
+				break;
+			}
+			case 'right': {
+				// 왼쪽 핸들 위치 고정
+				const oppositeX = cx - radius;
+				newCx = (dragHandlePos.x + oppositeX) / 2;
+				newRadius = Math.abs(dragHandlePos.x - oppositeX) / 2;
+				break;
+			}
+			case 'top': {
+				// 아래쪽 핸들 위치 고정
+				const oppositeY = cy + radius;
+				newCy = (dragHandlePos.y + oppositeY) / 2;
+				newRadius = Math.abs(oppositeY - dragHandlePos.y) / 2;
+				break;
+			}
+			case 'bottom': {
+				// 위쪽 핸들 위치 고정
+				const oppositeY = cy - radius;
+				newCy = (dragHandlePos.y + oppositeY) / 2;
+				newRadius = Math.abs(dragHandlePos.y - oppositeY) / 2;
+				break;
+			}
+			default:
+				return; // 코너 핸들은 무시 (Circle에서는 사용하지 않음)
+		}
+
+		// 최소 반지름 제한
+		const finalRadius = Math.max(MIN_SIZE / 2, newRadius);
+
+		editorStore.updateElement(element.id, {
+			transform: { ...element.transform, x: newCx, y: newCy },
 			radius: finalRadius
 		});
 	};
 
-	const handleEllipseResize = (dragHandlePos: Point, oppositePos: Point) => {
-		if (element.type !== 'ellipse') return;
+	/**
+	 * Ellipse 크기 조절 핸들러 (검증된 로직 적용)
+	 * 
+	 * 핵심 원리:
+	 * 1. 마우스 글로벌 좌표를 로컬 좌표로 변환 (회전 중심 기준)
+	 * 2. 현재 핸들의 widthId/heightId로 반대쪽 핸들의 로컬 좌표 참조
+	 * 3. 새 중심과 반지름 계산 (Ellipse는 중심 기준 좌표계)
+	 */
+	const handleEllipseResize = (mouseGlobalPos: Point) => {
+		if (element.type !== 'ellipse' || !dragHandle) return;
 
-		console.log('=== Ellipse Resize (Anchor Point Method) ===');
-		console.log('Drag Handle:', dragHandle);
-		console.log('Drag Handle Position:', dragHandlePos);
-		console.log('Opposite Handle Position (Fixed):', oppositePos);
+		const rotation = element.transform.rotation;
+		const rotateCenter: Point = { x: rotateCenterX, y: rotateCenterY };
 
-		// Calculate new center as midpoint between drag handle and opposite handle
-		const newX = (dragHandlePos.x + oppositePos.x) / 2;
-		const newY = (dragHandlePos.y + oppositePos.y) / 2;
+		// 1. 마우스 글로벌 좌표를 로컬 좌표로 변환 (회전의 역변환)
+		const mouseLocalPos = rotatePoint(mouseGlobalPos.x, mouseGlobalPos.y, rotateCenter.x, rotateCenter.y, -rotation);
 
-		// Calculate new radii based on distances
-		const newRadiusX = Math.abs(dragHandlePos.x - oppositePos.x) / 2;
-		const newRadiusY = Math.abs(dragHandlePos.y - oppositePos.y) / 2;
+		// 2. 현재 Ellipse의 로컬 핸들 위치 계산
+		// Ellipse는 중심(transform.x/y) 기준 좌표계
+		const cx = element.transform.x;
+		const cy = element.transform.y;
+		const rx = element.radiusX;
+		const ry = element.radiusY;
 
-		// Minimum radius constraints
-		const finalRadiusX = Math.max(5, newRadiusX);
-		const finalRadiusY = Math.max(5, newRadiusY);
+		// 로컬 좌표계에서의 8개 핸들 위치
+		const localHandles: Record<TransformHandle, { x: number; y: number }> = {
+			'top-left': { x: cx - rx, y: cy - ry },
+			'top': { x: cx, y: cy - ry },
+			'top-right': { x: cx + rx, y: cy - ry },
+			'right': { x: cx + rx, y: cy },
+			'bottom-right': { x: cx + rx, y: cy + ry },
+			'bottom': { x: cx, y: cy + ry },
+			'bottom-left': { x: cx - rx, y: cy + ry },
+			'left': { x: cx - rx, y: cy },
+			'rotate': { x: cx, y: cy - ry }
+		};
 
-		console.log('New Center:', { x: newX, y: newY });
-		console.log('New Radii:', { radiusX: finalRadiusX, radiusY: finalRadiusY });
-		console.log('Center moved by:', {
-			dx: newX - initialElement.transform.x,
-			dy: newY - initialElement.transform.y
-		});
+		// 현재 핸들의 widthId, heightId 찾기
+		const currentHandleInfo = handles().find(h => h.type === dragHandle);
+		if (!currentHandleInfo) return;
 
+		let newCx = cx;
+		let newCy = cy;
+		let newRx = rx;
+		let newRy = ry;
+
+		// 3. RadiusX 계산 (수평 방향)
+		if (currentHandleInfo.widthId) {
+			const widthHandlePos = localHandles[currentHandleInfo.widthId];
+			// Ellipse는 중심 기준이므로 새 중심과 반지름을 동시에 계산
+			newCx = (mouseLocalPos.x + widthHandlePos.x) / 2;
+			newRx = Math.abs(mouseLocalPos.x - widthHandlePos.x) / 2;
+			// 최소 크기 제한
+			if (newRx < MIN_SIZE / 2) {
+				newRx = MIN_SIZE / 2;
+				// 중심 위치도 조정
+				if (dragHandle.includes('left')) {
+					newCx = widthHandlePos.x - newRx;
+				} else {
+					newCx = widthHandlePos.x + newRx;
+				}
+			}
+		}
+
+		// 4. RadiusY 계산 (수직 방향)
+		if (currentHandleInfo.heightId) {
+			const heightHandlePos = localHandles[currentHandleInfo.heightId];
+			// Ellipse는 중심 기준이므로 새 중심과 반지름을 동시에 계산
+			newCy = (mouseLocalPos.y + heightHandlePos.y) / 2;
+			newRy = Math.abs(mouseLocalPos.y - heightHandlePos.y) / 2;
+			// 최소 크기 제한
+			if (newRy < MIN_SIZE / 2) {
+				newRy = MIN_SIZE / 2;
+				// 중심 위치도 조정
+				if (dragHandle.includes('top')) {
+					newCy = heightHandlePos.y - newRy;
+				} else {
+					newCy = heightHandlePos.y + newRy;
+				}
+			}
+		}
+
+		// 5. 업데이트
 		editorStore.updateElement(element.id, {
-			transform: { ...element.transform, x: newX, y: newY },
-			radiusX: finalRadiusX,
-			radiusY: finalRadiusY
+			transform: { ...element.transform, x: newCx, y: newCy },
+			radiusX: newRx,
+			radiusY: newRy
 		});
 	};
 
-	const handleLineResize = (dx: number, dy: number) => {
-		if (element.type !== 'line') return;
+	/**
+	 * Line 끝점 드래그 핸들러
+	 * 
+	 * Line의 특성:
+	 * - 양 끝점에만 핸들 배치
+	 * - 각 핸들을 드래그하면 해당 끝점만 마우스 따라 이동
+	 * - 반대쪽 끝점은 고정
+	 * - 회전 불필요 (끝점 위치로 방향 결정)
+	 * 
+	 * 핸들 매핑:
+	 * - 'top-left' = 첫 번째 끝점 (x1, y1)
+	 * - 'bottom-right' = 두 번째 끝점 (x2, y2)
+	 */
+	const handleLineResize = (mousePos: Point) => {
+		if (element.type !== 'line' || !dragHandle) return;
 
-		// Line uses relative coordinates, so we need to adjust the transform origin
-		// and the relative endpoints to maintain the anchor point
-		const initialX = initialElement.transform.x;
-		const initialY = initialElement.transform.y;
-		const initialX1 = initialElement.x1;
-		const initialY1 = initialElement.y1;
-		const initialX2 = initialElement.x2;
-		const initialY2 = initialElement.y2;
+		// Line의 좌표는 transform.x/y 기준 상대 좌표
+		// 글로벌 좌표 = transform + 상대 좌표
+		const baseX = element.transform.x;
+		const baseY = element.transform.y;
 
-		let newX = initialX;
-		let newY = initialY;
-		let newX1 = initialX1;
-		let newY1 = initialY1;
-		let newX2 = initialX2;
-		let newY2 = initialY2;
-
-		// Determine which end is which
-		const isX1Left = initialX1 < initialX2;
-		const isY1Top = initialY1 < initialY2;
-
-		// For lines, we adjust both the transform origin and the relative coordinates
-		// so that the opposite endpoint stays fixed
 		switch (dragHandle) {
 			case 'top-left':
-				// Anchor: bottom-right
-				newX = initialX + dx / 2;
-				newY = initialY + dy / 2;
-				if (isX1Left) {
-					newX1 = initialX1 - dx / 2;
-					newX2 = initialX2 - dx / 2;
-				} else {
-					newX1 = initialX1 - dx / 2;
-					newX2 = initialX2 - dx / 2;
-				}
-				if (isY1Top) {
-					newY1 = initialY1 - dy / 2;
-					newY2 = initialY2 - dy / 2;
-				} else {
-					newY1 = initialY1 - dy / 2;
-					newY2 = initialY2 - dy / 2;
-				}
-				break;
-			case 'top-right':
-				// Anchor: bottom-left
-				newX = initialX + dx / 2;
-				newY = initialY + dy / 2;
-				newX1 = initialX1 + dx / 2;
-				newX2 = initialX2 + dx / 2;
-				newY1 = initialY1 - dy / 2;
-				newY2 = initialY2 - dy / 2;
-				break;
-			case 'bottom-left':
-				// Anchor: top-right
-				newX = initialX + dx / 2;
-				newY = initialY + dy / 2;
-				newX1 = initialX1 - dx / 2;
-				newX2 = initialX2 - dx / 2;
-				newY1 = initialY1 + dy / 2;
-				newY2 = initialY2 + dy / 2;
+				// 첫 번째 끝점 이동 (x1, y1)
+				editorStore.updateElement(element.id, {
+					x1: mousePos.x - baseX,
+					y1: mousePos.y - baseY
+				});
 				break;
 			case 'bottom-right':
-				// Anchor: top-left
-				newX = initialX + dx / 2;
-				newY = initialY + dy / 2;
-				newX1 = initialX1 + dx / 2;
-				newX2 = initialX2 + dx / 2;
-				newY1 = initialY1 + dy / 2;
-				newY2 = initialY2 + dy / 2;
+				// 두 번째 끝점 이동 (x2, y2)
+				editorStore.updateElement(element.id, {
+					x2: mousePos.x - baseX,
+					y2: mousePos.y - baseY
+				});
 				break;
-			case 'top':
-				// Anchor: bottom
-				newY = initialY + dy / 2;
-				newY1 = initialY1 - dy / 2;
-				newY2 = initialY2 - dy / 2;
-				break;
-			case 'bottom':
-				// Anchor: top
-				newY = initialY + dy / 2;
-				newY1 = initialY1 + dy / 2;
-				newY2 = initialY2 + dy / 2;
-				break;
-			case 'left':
-				// Anchor: right
-				newX = initialX + dx / 2;
-				newX1 = initialX1 - dx / 2;
-				newX2 = initialX2 - dx / 2;
-				break;
-			case 'right':
-				// Anchor: left
-				newX = initialX + dx / 2;
-				newX1 = initialX1 + dx / 2;
-				newX2 = initialX2 + dx / 2;
-				break;
+			default:
+				return; // 다른 핸들은 무시
 		}
-
-		editorStore.updateElement(element.id, {
-			transform: { ...element.transform, x: newX, y: newY },
-			x1: newX1,
-			y1: newY1,
-			x2: newX2,
-			y2: newY2
-		});
 	};
 
 	$effect(() => {
@@ -775,36 +864,59 @@
 	const handles = $derived(() => {
 		// Use bounds() to update handles in real-time during drag
 		const b = bounds();
+		// widthId: 너비 계산 시 기준이 되는 반대쪽 핸들 (수평 방향)
+		// heightId: 높이 계산 시 기준이 되는 반대쪽 핸들 (수직 방향)
 		return [
-			{ type: 'top-left' as TransformHandle, x: b.x, y: b.y },
-			{ type: 'top-right' as TransformHandle, x: b.x + b.width, y: b.y },
-			{ type: 'bottom-left' as TransformHandle, x: b.x, y: b.y + b.height },
-			{ type: 'bottom-right' as TransformHandle, x: b.x + b.width, y: b.y + b.height },
-			{ type: 'top' as TransformHandle, x: b.x + b.width / 2, y: b.y },
-			{ type: 'bottom' as TransformHandle, x: b.x + b.width / 2, y: b.y + b.height },
-			{ type: 'left' as TransformHandle, x: b.x, y: b.y + b.height / 2 },
-			{ type: 'right' as TransformHandle, x: b.x + b.width, y: b.y + b.height / 2 }
+			{ type: 'top-left' as TransformHandle, x: b.x, y: b.y, widthId: 'top-right' as TransformHandle, heightId: 'bottom-left' as TransformHandle },
+			{ type: 'top-right' as TransformHandle, x: b.x + b.width, y: b.y, widthId: 'top-left' as TransformHandle, heightId: 'bottom-right' as TransformHandle },
+			{ type: 'bottom-left' as TransformHandle, x: b.x, y: b.y + b.height, widthId: 'bottom-right' as TransformHandle, heightId: 'top-left' as TransformHandle },
+			{ type: 'bottom-right' as TransformHandle, x: b.x + b.width, y: b.y + b.height, widthId: 'bottom-left' as TransformHandle, heightId: 'top-right' as TransformHandle },
+			{ type: 'top' as TransformHandle, x: b.x + b.width / 2, y: b.y, widthId: null, heightId: 'bottom' as TransformHandle },
+			{ type: 'bottom' as TransformHandle, x: b.x + b.width / 2, y: b.y + b.height, widthId: null, heightId: 'top' as TransformHandle },
+			{ type: 'left' as TransformHandle, x: b.x, y: b.y + b.height / 2, widthId: 'right' as TransformHandle, heightId: null },
+			{ type: 'right' as TransformHandle, x: b.x + b.width, y: b.y + b.height / 2, widthId: 'left' as TransformHandle, heightId: null }
 		];
 	});
 </script>
 
-{#if element.type === 'rectangle' || element.type === 'line'}
-	<!-- For Rectangle and Line: Rotated selection box and handles -->
+<svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
+
+{#if element.type === 'rectangle' || element.type === 'text'}
+	<!-- Rectangle/Text: Rotated selection box and handles -->
+	<!-- 드래그 중에는 고정된 rotateCenterX/Y 사용, 그 외에는 centerPoint() 사용 -->
+	{@const rotCenterX = isDragging ? rotateCenterX : centerPoint().x}
+	{@const rotCenterY = isDragging ? rotateCenterY : centerPoint().y}
 	<g
 		class="transform-controls"
-		transform="rotate({element.transform.rotation} {centerPoint().x} {centerPoint().y})"
+		transform="rotate({element.transform.rotation} {rotCenterX} {rotCenterY})"
 	>
 		<!-- Selection box -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<rect
 			x={bounds().x}
 			y={bounds().y}
 			width={bounds().width}
 			height={bounds().height}
-			fill="none"
+			fill={element.type === 'text' ? 'rgba(255,255,255,0.01)' : 'none'}
 			stroke="#4f46e5"
 			stroke-width="1"
 			stroke-dasharray="4 2"
-			pointer-events="none"
+			pointer-events={element.type === 'text' && !isTextEditing ? 'fill' : 'none'}
+			onmousedown={(e: MouseEvent) => {
+				if (element.type === 'text' && !isTextEditing) {
+					e.stopPropagation();
+					// 텍스트 이동 시작 (클릭 vs 드래그 구분은 mouseup에서)
+					isMovingText = true;
+					hasMovedText = false;
+					textMoveStart = getMousePosition(e, svgElement);
+				}
+			}}
+			ondblclick={(e: MouseEvent) => {
+				if (element.type === 'text' && !isTextEditing) {
+					e.stopPropagation();
+					onStartTextEdit?.(element.id);
+				}
+			}}
 		/>
 
 		<!-- Rotation handle line -->
@@ -851,14 +963,99 @@
 			/>
 		{/each}
 	</g>
-{:else}
-	<!-- For Circle and Ellipse: Rotated selection box, non-rotated handles -->
+{:else if element.type === 'line'}
+	<!-- Line: 양 끝점에만 핸들 배치, 회전/선택 박스 없음 -->
+	{@const baseX = element.transform.x}
+	{@const baseY = element.transform.y}
+	{@const point1 = { x: baseX + element.x1, y: baseY + element.y1 }}
+	{@const point2 = { x: baseX + element.x2, y: baseY + element.y2 }}
+	
+	<!-- 선 연결 표시 (점선) -->
+	<line
+		x1={point1.x}
+		y1={point1.y}
+		x2={point2.x}
+		y2={point2.y}
+		stroke="#4f46e5"
+		stroke-width="1"
+		stroke-dasharray="4 2"
+		pointer-events="none"
+	/>
+
+	<!-- 첫 번째 끝점 핸들 -->
+	<circle
+		cx={point1.x}
+		cy={point1.y}
+		r="5"
+		fill="white"
+		stroke="#4f46e5"
+		stroke-width="1.5"
+		class="cursor-pointer"
+		role="button"
+		tabindex="0"
+		aria-label="Line endpoint 1"
+		onmousedown={(e) => handleMouseDown('top-left', e)}
+	/>
+
+	<!-- 두 번째 끝점 핸들 -->
+	<circle
+		cx={point2.x}
+		cy={point2.y}
+		r="5"
+		fill="white"
+		stroke="#4f46e5"
+		stroke-width="1.5"
+		class="cursor-pointer"
+		role="button"
+		tabindex="0"
+		aria-label="Line endpoint 2"
+		onmousedown={(e) => handleMouseDown('bottom-right', e)}
+	/>
+{:else if element.type === 'circle'}
+	<!-- Circle: 상하좌우 핸들만, 회전 핸들 없음 (원은 회전해도 동일) -->
 	{@const b = bounds()}
+	
+	<!-- Selection box (회전 불필요) -->
+	<rect
+		x={b.x}
+		y={b.y}
+		width={b.width}
+		height={b.height}
+		fill="none"
+		stroke="#4f46e5"
+		stroke-width="1"
+		stroke-dasharray="4 2"
+		pointer-events="none"
+	/>
+
+	<!-- 상하좌우 핸들만 (코너 핸들 제외) -->
+	{#each handles().filter(h => ['top', 'bottom', 'left', 'right'].includes(h.type)) as handle}
+		<rect
+			x={handle.x - 4}
+			y={handle.y - 4}
+			width="8"
+			height="8"
+			fill="white"
+			stroke="#4f46e5"
+			stroke-width="1.5"
+			class="cursor-pointer"
+			role="button"
+			tabindex="0"
+			aria-label="Resize handle: {handle.type}"
+			onmousedown={(e) => handleMouseDown(handle.type, e)}
+		/>
+	{/each}
+{:else}
+	<!-- Ellipse: Rotated selection box, non-rotated handles, rotation handle -->
+	{@const b = bounds()}
+	<!-- Ellipse 드래그 중에는 고정된 rotateCenterX/Y 사용, 그 외에는 centerPoint() 사용 -->
+	{@const rotCenterX = isDragging ? rotateCenterX : centerPoint().x}
+	{@const rotCenterY = isDragging ? rotateCenterY : centerPoint().y}
 	
 	<!-- Rotated group: Selection box and rotation handle only -->
 	<g
 		class="transform-controls"
-		transform="rotate({element.transform.rotation} {centerPoint().x} {centerPoint().y})"
+		transform="rotate({element.transform.rotation} {rotCenterX} {rotCenterY})"
 	>
 		<!-- Selection box -->
 		<rect

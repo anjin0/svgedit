@@ -5,6 +5,10 @@ class TransformStore {
 	handle = $state<TransformHandle | null>(null);
 	startPoint = $state<Point | null>(null);
 	elementId = $state<string | null>(null);
+	
+	// 드래그 중 고정된 회전 중심 (Rectangle용)
+	rotateCenterX = $state<number | null>(null);
+	rotateCenterY = $state<number | null>(null);
 
 	startTransform = (elementId: string, handle: TransformHandle, point: Point) => {
 		this.isTransforming = true;
@@ -13,11 +17,18 @@ class TransformStore {
 		this.startPoint = point;
 	};
 
+	setRotateCenter = (x: number, y: number) => {
+		this.rotateCenterX = x;
+		this.rotateCenterY = y;
+	};
+
 	endTransform = () => {
 		this.isTransforming = false;
 		this.elementId = null;
 		this.handle = null;
 		this.startPoint = null;
+		this.rotateCenterX = null;
+		this.rotateCenterY = null;
 	};
 
 	reset = () => {
@@ -25,6 +36,8 @@ class TransformStore {
 		this.elementId = null;
 		this.handle = null;
 		this.startPoint = null;
+		this.rotateCenterX = null;
+		this.rotateCenterY = null;
 	};
 }
 

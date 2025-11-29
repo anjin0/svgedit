@@ -3,11 +3,13 @@
 	import { editorStore } from '$lib/stores/editor.svelte';
 	import { selectionStore } from '$lib/stores/selection.svelte';
 	import { drawingStore } from '$lib/stores/drawing.svelte';
-	import { getMousePosition, createRectangle, createCircle, createEllipse, createLine } from '$lib/utils/svg';
+	import { transformStore } from '$lib/stores/transform.svelte';
+	import { getMousePosition, createRectangle, createCircle, createEllipse, createLine, createText } from '$lib/utils/svg';
 	import Rectangle from './elements/Rectangle.svelte';
 	import Circle from './elements/Circle.svelte';
 	import Ellipse from './elements/Ellipse.svelte';
 	import Line from './elements/Line.svelte';
+	import Text from './elements/Text.svelte';
 	import TransformControls from './TransformControls.svelte';
 	import type { Point } from '$lib/types';
 
@@ -16,6 +18,7 @@
 	let lastPanPoint = $state({ x: 0, y: 0 });
 	let isMoving = $state(false);
 	let moveStartPoint = $state<Point | null>(null);
+	let editingTextId = $state<string | null>(null);
 
 	const handleMouseDown = (e: MouseEvent) => {
 		if (!svgElement) return;
@@ -33,11 +36,12 @@
 		// Select tool - clicking on empty space deselects
 		if (currentTool === 'select') {
 			selectionStore.clearSelection();
+			editingTextId = null; // 텍스트 편집 모드 종료
 			return;
 		}
 
 		// Drawing tools
-		if (['rectangle', 'circle', 'ellipse', 'line'].includes(currentTool)) {
+		if (['rectangle', 'circle', 'ellipse', 'line', 'text'].includes(currentTool)) {
 			const point = getMousePosition(e, svgElement);
 			drawingStore.startDrawing(point);
 		}
@@ -127,6 +131,9 @@
 			case 'line':
 				drawingStore.setPreviewElement(createLine(startPoint, currentPoint));
 				break;
+			case 'text':
+				drawingStore.setPreviewElement(createText(startPoint, currentPoint));
+				break;
 		}
 	};
 
@@ -147,22 +154,62 @@
 			case 'line':
 				element = createLine(start, end);
 				break;
+			case 'text':
+				element = createText(start, end);
+				break;
 		}
 
 		if (element) {
 			editorStore.addElement(element);
+			// 텍스트인 경우 생성 후 바로 편집 모드 진입
+			if (element.type === 'text') {
+				const textId = element.id;
+				editorStore.setTool('select');
+				// 다음 틱에서 선택 및 편집 모드 진입 (렌더링 완료 후)
+				setTimeout(() => {
+					selectionStore.select(textId, false);
+					editingTextId = textId;
+				}, 0);
+			}
 		}
 	};
 
 	const handleElementSelect = (id: string, e?: MouseEvent) => {
 		if (editorStore.currentTool === 'select') {
+			const element = editorStore.getElementById(id);
+			
+			// 편집 중인 텍스트를 다시 클릭하면 무시 (텍스트 선택 유지)
+			if (editingTextId === id) return;
+			
+			// 다른 요소 선택 시 텍스트 편집 모드 종료
+			if (editingTextId && editingTextId !== id) {
+				editingTextId = null;
+			}
+			
+			// 이미 선택된 텍스트를 클릭하면 → 편집 모드 진입
+			if (element?.type === 'text' && selectionStore.isSelected(id)) {
+				editingTextId = id;
+				return; // 이동 시작 안 함
+			}
+			
 			const multiSelect = e ? (e.ctrlKey || e.metaKey) : false;
 			selectionStore.select(id, multiSelect);
-			if (e && svgElement && !multiSelect) {
+			
+			// 편집 중이 아닐 때만 이동 가능
+			if (e && svgElement && !multiSelect && !editingTextId) {
 				isMoving = true;
 				moveStartPoint = getMousePosition(e, svgElement);
 			}
 		}
+	};
+
+	const handleStartTextEdit = (id: string) => {
+		editingTextId = id;
+	};
+
+	const handleEndTextEdit = () => {
+		editingTextId = null;
+		// 선택은 유지됨
 	};
 
 	const renderGrid = (): string => {
@@ -171,6 +218,15 @@
 	};
 
 	const handleKeyDown = (e: KeyboardEvent) => {
+		// ESC: 편집 중이면 편집만 종료 (선택 유지)
+		if (e.key === 'Escape' && editingTextId) {
+			editingTextId = null;
+			return;
+		}
+		
+		// 텍스트 편집 중일 때는 Delete/Backspace 가로채지 않음
+		if (editingTextId) return;
+
 		if (e.key === 'Delete' || e.key === 'Backspace') {
 			selectionStore.selectedIds.forEach((id) => {
 				editorStore.removeElement(id);
@@ -216,6 +272,8 @@
 					{element}
 					isSelected={selectionStore.isSelected(element.id)}
 					onSelect={handleElementSelect}
+					rotateCenterX={selectionStore.isSelected(element.id) ? transformStore.rotateCenterX : null}
+					rotateCenterY={selectionStore.isSelected(element.id) ? transformStore.rotateCenterY : null}
 				/>
 			{:else if element.type === 'circle'}
 				<Circle
@@ -228,12 +286,25 @@
 					{element}
 					isSelected={selectionStore.isSelected(element.id)}
 					onSelect={handleElementSelect}
+					rotateCenterX={selectionStore.isSelected(element.id) ? transformStore.rotateCenterX : null}
+					rotateCenterY={selectionStore.isSelected(element.id) ? transformStore.rotateCenterY : null}
 				/>
 			{:else if element.type === 'line'}
 				<Line
 					{element}
 					isSelected={selectionStore.isSelected(element.id)}
 					onSelect={handleElementSelect}
+				/>
+			{:else if element.type === 'text'}
+				<Text
+					{element}
+					isSelected={selectionStore.isSelected(element.id)}
+					isEditing={editingTextId === element.id}
+					onSelect={handleElementSelect}
+					onStartEdit={handleStartTextEdit}
+					onEndEdit={handleEndTextEdit}
+					rotateCenterX={selectionStore.isSelected(element.id) ? transformStore.rotateCenterX : null}
+					rotateCenterY={selectionStore.isSelected(element.id) ? transformStore.rotateCenterY : null}
 				/>
 			{/if}
 		{/each}
@@ -242,7 +313,7 @@
 		{#each selectionStore.selectedIds as selectedId}
 			{@const selectedElement = editorStore.getElementById(selectedId)}
 			{#if selectedElement && svgElement}
-				<TransformControls element={selectedElement} {svgElement} />
+				<TransformControls element={selectedElement} {svgElement} onStartTextEdit={handleStartTextEdit} onEndTextEdit={handleEndTextEdit} isTextEditing={editingTextId === selectedElement.id} />
 			{/if}
 		{/each}
 
@@ -257,6 +328,18 @@
 				<Ellipse element={preview} isSelected={false} />
 			{:else if preview.type === 'line'}
 				<Line element={preview} isSelected={false} />
+			{:else if preview.type === 'text'}
+				<!-- Text 프리뷰는 단순 점선 사각형으로 표시 -->
+				<rect
+					x={preview.transform.x}
+					y={preview.transform.y}
+					width={preview.width}
+					height={preview.height}
+					fill="rgba(79, 70, 229, 0.1)"
+					stroke="#4f46e5"
+					stroke-width="1"
+					stroke-dasharray="4 2"
+				/>
 			{/if}
 		{/if}
 	</svg>

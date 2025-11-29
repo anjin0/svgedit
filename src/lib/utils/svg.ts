@@ -4,7 +4,8 @@ import type {
 	RectangleElement,
 	CircleElement,
 	EllipseElement,
-	LineElement
+	LineElement,
+	TextElement
 } from '$lib/types';
 
 export const generateId = (): string => {
@@ -162,6 +163,52 @@ export const createLine = (
 			opacity: 1,
 			lineCap: 'round',
 			lineJoin: 'round'
+		},
+		visible: true,
+		locked: false,
+		opacity: 1
+	};
+};
+
+export const createText = (
+	start: Point,
+	end: Point,
+	options: { fontSize?: number; fontFamily?: string; fill?: string } = {}
+): TextElement => {
+	const x = Math.min(start.x, end.x);
+	const y = Math.min(start.y, end.y);
+	const width = Math.max(Math.abs(end.x - start.x), 150); // 최소 너비 150
+	const height = Math.max(Math.abs(end.y - start.y), 32); // 최소 높이 32
+
+	return {
+		id: generateId(),
+		type: 'text',
+		name: 'Text',
+		content: '',
+		fontSize: options.fontSize || 16,
+		fontFamily: options.fontFamily || 'Arial, sans-serif',
+		fontWeight: 400,
+		textAnchor: 'start',
+		width,
+		height,
+		transform: {
+			x,
+			y,
+			rotation: 0,
+			scaleX: 1,
+			scaleY: 1
+		},
+		fill: {
+			type: 'solid',
+			color: options.fill || '#000000',
+			opacity: 1
+		},
+		stroke: {
+			color: 'none',
+			width: 0,
+			opacity: 0,
+			lineCap: 'butt',
+			lineJoin: 'miter'
 		},
 		visible: true,
 		locked: false,

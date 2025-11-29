@@ -5,9 +5,17 @@
 		element: EllipseElement;
 		isSelected?: boolean;
 		onSelect?: (id: string, e?: MouseEvent) => void;
+		// 외부에서 전달되는 회전 중심 (TransformControls와 동기화용)
+		rotateCenterX?: number | null;
+		rotateCenterY?: number | null;
 	}
 
-	let { element, isSelected = false, onSelect }: Props = $props();
+	let { element, isSelected = false, onSelect, rotateCenterX = null, rotateCenterY = null }: Props = $props();
+
+	// 회전 중심: 외부에서 전달되면 사용, 아니면 현재 중심(transform.x/y) 사용
+	// Ellipse는 중심 기준 좌표계이므로 transform.x/y가 곧 회전 중심
+	const effectiveRotateCenterX = $derived(rotateCenterX ?? element.transform.x);
+	const effectiveRotateCenterY = $derived(rotateCenterY ?? element.transform.y);
 
 	const handleMouseDown = (e: MouseEvent) => {
 		e.stopPropagation();
@@ -49,7 +57,7 @@
 	stroke={element.stroke.color}
 	stroke-width={element.stroke.width}
 	opacity={element.opacity}
-	transform="rotate({element.transform.rotation} {element.transform.x} {element.transform.y})"
+	transform="rotate({element.transform.rotation} {effectiveRotateCenterX} {effectiveRotateCenterY})"
 	class="cursor-pointer"
 	onmousedown={handleMouseDown}
 	visibility={element.visible ? 'visible' : 'hidden'}

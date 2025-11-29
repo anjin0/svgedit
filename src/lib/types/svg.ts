@@ -95,6 +95,8 @@ export type TextElement = BaseSVGElement & {
 	fontFamily: string;
 	fontWeight: number | string;
 	textAnchor: 'start' | 'middle' | 'end';
+	width: number;
+	height: number;
 };
 
 export type LineElement = BaseSVGElement & {
